@@ -225,6 +225,15 @@ if(STARFOX_BUILD_RUNTIME)
         target_sources(starfox_pc PRIVATE ${STARFOX_IOS_RESOURCES})
         set_source_files_properties(${STARFOX_IOS_RESOURCES} PROPERTIES
             MACOSX_PACKAGE_LOCATION Resources)
+
+        # The application icon. Xcode compiles a catalog placed in the
+        # resources phase with actool, which is what produces Assets.car and
+        # the CFBundleIcons entries; a loose PNG would be ignored by iOS.
+        set(STARFOX_IOS_ASSET_CATALOG
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/app/ios/Assets.xcassets")
+        target_sources(starfox_pc PRIVATE "${STARFOX_IOS_ASSET_CATALOG}")
+        set_source_files_properties("${STARFOX_IOS_ASSET_CATALOG}" PROPERTIES
+            MACOSX_PACKAGE_LOCATION Resources)
         target_compile_definitions(starfox_pc PRIVATE
             STARFOX_HAS_EMBEDDED_ASSETS=1
             STARFOX_BUNDLED_ASSETS=1)
@@ -241,6 +250,7 @@ if(STARFOX_BUILD_RUNTIME)
             # install location and is not skipped. CMake leaves both unset, so
             # without these an archive builds "successfully" and contains no
             # application at all, which is what breaks IPA export.
+            XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon"
             XCODE_ATTRIBUTE_INSTALL_PATH "$(LOCAL_APPS_DIR)"
             XCODE_ATTRIBUTE_SKIP_INSTALL "NO"
             XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "${STARFOX_IOS_CODE_SIGN_IDENTITY}"
