@@ -424,6 +424,18 @@ if(STARFOX_BUILD_TESTS)
                     "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy;STARFOX_TEST_FRAMES=6"
                 TIMEOUT 10
             )
+            add_test(
+                NAME starfox_save_state_menu_smoke
+                COMMAND starfox_pc
+                        "${CMAKE_CURRENT_SOURCE_DIR}/upstream-ultrastarfox/SF.SFC"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/upstream-ultrastarfox/SYMBOLS.TXT"
+                        LEVEL1_1
+            )
+            set_tests_properties(starfox_save_state_menu_smoke PROPERTIES
+                ENVIRONMENT
+                    "SDL_VIDEODRIVER=dummy;SDL_AUDIODRIVER=dummy;STARFOX_TEST_FRAMES=6;STARFOX_TEST_SAVE_MENU=1"
+                TIMEOUT 10
+            )
             if(STARFOX_RUNTIME_ASSETS_EMBEDDED)
                 file(MAKE_DIRECTORY
                     "${CMAKE_CURRENT_BINARY_DIR}/embedded-runtime-smoke")

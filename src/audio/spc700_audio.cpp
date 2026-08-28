@@ -239,6 +239,71 @@ std::vector<std::int16_t> Spc700Audio::render_logic_tick(
     return impl_->render(writes);
 }
 
+namespace {
+
+// blargg's state copier drives one callback in both directions: saving
+// appends to the buffer, loading reads from it.
+void copy_out(unsigned char** io, void* state, size_t size) {
+    auto*& cursor = *reinterpret_cast<std::uint8_t**>(io);
+    std::memcpy(cursor, state, size);
+    cursor += size;
+}
+
+void copy_in(unsigned char** io, void* state, size_t size) {
+    auto*& cursor = *reinterpret_cast<std::uint8_t**>(io);
+    std::memcpy(state, cursor, size);
+    cursor += size;
+}
+
+} // namespace
+
+std::vector<std::uint8_t> Spc700Audio::capture_state() const {
+    // The core's own state, then the cartridge upload protocol's position,
+    // which lives on this side of the emulator and is not part of it.
+    std::vector<std::uint8_t> state(spc_state_size);
+    auto* cursor = state.data();
+    spc_copy_state(impl_->spc, &cursor, &copy_out);
+    state.resize(static_cast<std::size_t>(cursor - state.data()));
+
+    const auto append = [&state](const void* data, std::size_t size) {
+        const auto* bytes = static_cast<const std::uint8_t*>(data);
+        state.insert(state.end(), bytes, bytes + size);
+    };
+    append(impl_->aram.data(), impl_->aram.size());
+    append(impl_->cpu_ports.data(), impl_->cpu_ports.size());
+    const auto upload_state = static_cast<std::uint8_t>(impl_->upload_state);
+    append(&upload_state, sizeof(upload_state));
+    append(&impl_->upload_address, sizeof(impl_->upload_address));
+    append(&impl_->execute_address, sizeof(impl_->execute_address));
+    append(&impl_->transfer_enabled, sizeof(impl_->transfer_enabled));
+    append(&impl_->uploading, sizeof(impl_->uploading));
+    append(&impl_->loaded, sizeof(impl_->loaded));
+    return state;
+}
+
+void Spc700Audio::restore_state(std::span<const std::uint8_t> state) {
+    if (state.empty()) return;
+    auto* cursor = const_cast<std::uint8_t*>(state.data());
+    spc_copy_state(impl_->spc, &cursor, &copy_in);
+
+    const auto read = [&cursor](void* data, std::size_t size) {
+        std::memcpy(data, cursor, size);
+        cursor += size;
+    };
+    read(impl_->aram.data(), impl_->aram.size());
+    read(impl_->cpu_ports.data(), impl_->cpu_ports.size());
+    std::uint8_t upload_state{};
+    read(&upload_state, sizeof(upload_state));
+    impl_->upload_state = static_cast<Impl::UploadState>(upload_state);
+    read(&impl_->upload_address, sizeof(impl_->upload_address));
+    read(&impl_->execute_address, sizeof(impl_->execute_address));
+    read(&impl_->transfer_enabled, sizeof(impl_->transfer_enabled));
+    read(&impl_->uploading, sizeof(impl_->uploading));
+    read(&impl_->loaded, sizeof(impl_->loaded));
+    // Drop whatever the filter was carrying from the abandoned timeline.
+    spc_filter_clear(impl_->filter);
+}
+
 bool Spc700Audio::driver_loaded() const noexcept { return impl_->loaded; }
 std::size_t Spc700Audio::uploaded_bytes() const noexcept {
     return impl_->upload_count;

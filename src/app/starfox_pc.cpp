@@ -30,7 +30,9 @@
 #include <chrono>
 #include <cmath>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -38,6 +40,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -1154,6 +1157,14 @@ public:
         return emulator_.output_ports();
     }
 
+    [[nodiscard]] std::vector<std::uint8_t> capture_audio_state() const {
+        return emulator_.capture_state();
+    }
+
+    void restore_audio_state(std::span<const std::uint8_t> state) {
+        emulator_.restore_state(state);
+    }
+
 private:
     starfox::audio::Spc700Audio emulator_;
     SDL_AudioStream* stream_{};
@@ -1198,6 +1209,27 @@ private:
     std::uint32_t presentation_hz_{starfox::timing::kPresentationHz};
 };
 
+// A save state slot. The simulation is held by pointer because its internal
+// pointers are repaired to a fixed address and it must not be relocated.
+struct SaveSlot {
+    std::unique_ptr<starfox::simulation::GameSimulation> simulation;
+    std::vector<std::uint8_t> audio;
+    std::string label;
+
+    [[nodiscard]] bool occupied() const noexcept {
+        return simulation != nullptr;
+    }
+};
+
+struct SaveStateMenuState {
+    static constexpr std::size_t slot_count = 4U;
+
+    bool active{};
+    std::size_t selection{};
+    std::string status;
+    std::array<SaveSlot, slot_count> slots;
+};
+
 struct RemapMenuState {
     bool active{};
     bool waiting_for_input{};
@@ -1214,6 +1246,77 @@ struct HudEditorState {
     float grab_x{};
     float grab_y{};
 };
+
+// Slots are distinguished by when they were taken; a scene name would be
+// wrong the moment the player crosses a transition.
+std::string describe_now() {
+    const auto now = std::time(nullptr);
+    std::tm parts{};
+#if defined(_WIN32)
+    localtime_s(&parts, &now);
+#else
+    localtime_r(&now, &parts);
+#endif
+    char text[16]{};
+    std::snprintf(text, sizeof(text), "%02d-%02d-%02d",
+        parts.tm_hour, parts.tm_min, parts.tm_sec);
+    return text;
+}
+
+void draw_save_state_menu(
+    starfox::render::Framebuffer& framebuffer,
+    const starfox::render::ScaledTextRenderer& text_renderer,
+    const SaveStateMenuState& menu) {
+    constexpr auto palette_base = static_cast<std::uint8_t>(7U * 16U);
+    const auto width = static_cast<std::int32_t>(framebuffer.width());
+    const auto solid = [&framebuffer](std::int32_t x, std::int32_t y,
+                           std::int32_t box_width, std::int32_t box_height,
+                           std::uint8_t colour) {
+        for (std::int32_t row = 0; row < box_height; ++row) {
+            for (std::int32_t column = 0; column < box_width; ++column) {
+                framebuffer.set(x + column, y + row, colour);
+            }
+        }
+    };
+
+    constexpr std::int32_t panel_height = 96;
+    const auto panel_top = 224 / 2 - panel_height / 2;
+    const auto panel_left = width / 2 - 92;
+    solid(panel_left, panel_top, 184, panel_height,
+        static_cast<std::uint8_t>(palette_base + 1U));
+    // A one pixel frame keeps the panel legible over a bright scene.
+    solid(panel_left, panel_top, 184, 1, 14U);
+    solid(panel_left, panel_top + panel_height - 1, 184, 1, 14U);
+    solid(panel_left, panel_top, 1, panel_height, 14U);
+    solid(panel_left + 183, panel_top, 1, panel_height, 14U);
+
+    const auto centred = [&](const std::string& text, std::int32_t y,
+                             std::uint8_t colour) {
+        text_renderer.draw_ascii(text,
+            width / 2 - text_renderer.measure_ascii(text) / 2, y,
+            framebuffer, colour);
+    };
+    centred("SAVE STATES", panel_top + 6, 14U);
+
+    for (std::size_t index = 0; index < menu.slots.size(); ++index) {
+        const auto& slot = menu.slots[index];
+        const auto y = panel_top + 22 + static_cast<std::int32_t>(index) * 12;
+        const auto selected = index == menu.selection;
+        const std::string row = std::string{selected ? "-" : " "} + " SLOT "
+            + std::to_string(index + 1U) + "  "
+            + (slot.occupied() ? slot.label : std::string{"EMPTY"});
+        text_renderer.draw_ascii(row, panel_left + 8, y, framebuffer,
+            selected ? 14U : 12U);
+    }
+
+    const auto& selected = menu.slots[menu.selection];
+    centred(selected.occupied() ? "A SAVE   X LOAD   B CLOSE"
+                                : "A SAVE   B CLOSE",
+        panel_top + panel_height - 22, 12U);
+    if (!menu.status.empty()) {
+        centred(menu.status, panel_top + panel_height - 12, 14U);
+    }
+}
 
 void draw_hud_editor_chrome(
     starfox::render::Framebuffer& framebuffer,
@@ -1882,8 +1985,7 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
         // gives the screen back rather than sitting on top of the game.
         const auto update_touch_visibility = [&](bool has_gamepad) {
 #if defined(STARFOX_BUNDLED_ASSETS)
-            if (touch_controls.visible() == !has_gamepad) return;
-            touch_controls.set_visible(!has_gamepad);
+            touch_controls.set_pads_hidden(has_gamepad);
             touch_controls.release_all();
 #else
             static_cast<void>(has_gamepad);
@@ -1940,6 +2042,8 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
         };
         starfox::input::InputLatch remap_input;
         RemapMenuState remap_menu;
+        SaveStateMenuState save_menu;
+        save_menu.active = std::getenv("STARFOX_TEST_SAVE_MENU") != nullptr;
         HudEditorState hud_editor;
         hud_editor.active = hud_editor_preview;
         bool running = true;
@@ -2130,6 +2234,12 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
             bool step_frame_backward{};
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
+                if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat
+                    && event.key.scancode == SDL_SCANCODE_F2
+                    && !remap_menu.active && !hud_editor.active) {
+                    save_menu.active = !save_menu.active;
+                    save_menu.status.clear();
+                }
                 const auto frame_debug_key = event.type == SDL_EVENT_KEY_DOWN
                     && !event.key.repeat
                     && (event.key.scancode == SDL_SCANCODE_F5
@@ -2470,6 +2580,13 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
             }
             reconcile_gamepads();
             update_touch_visibility(gamepad != nullptr);
+#if defined(STARFOX_BUNDLED_ASSETS)
+            if (touch_controls.consume_menu_press()
+                && !remap_menu.active && !hud_editor.active) {
+                save_menu.active = !save_menu.active;
+                save_menu.status.clear();
+            }
+#endif
             auto sampled_buttons = sample_player_buttons(gamepad);
             for (const auto& press : scripted_presses) {
                 if (presented_frames >= press.presentation_frame
@@ -2534,7 +2651,50 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
                         && (controls.held & starfox::input::select) != 0) {
                         running = false;
                     }
-                    if (hud_editor.active) {
+                    if (save_menu.active) {
+                        if ((remap_controls.pressed
+                             & starfox::input::up) != 0U) {
+                            save_menu.selection =
+                                (save_menu.selection
+                                    + SaveStateMenuState::slot_count - 1U)
+                                % SaveStateMenuState::slot_count;
+                            save_menu.status.clear();
+                        }
+                        if ((remap_controls.pressed
+                             & starfox::input::down) != 0U) {
+                            save_menu.selection = (save_menu.selection + 1U)
+                                % SaveStateMenuState::slot_count;
+                            save_menu.status.clear();
+                        }
+                        auto& slot = save_menu.slots[save_menu.selection];
+                        if ((remap_controls.pressed
+                             & starfox::input::a) != 0U) {
+                            slot.simulation = game.clone();
+                            slot.audio = audio.capture_audio_state();
+                            slot.label = describe_now();
+                            save_menu.status = "SAVED";
+                        }
+                        if ((remap_controls.pressed
+                             & starfox::input::x) != 0U
+                            && slot.occupied()) {
+                            game.restore_from(*slot.simulation);
+                            audio.restore_audio_state(slot.audio);
+                            // The restored machine has no relationship to the
+                            // transitions the latches were mid-way through.
+                            input.reset();
+                            for (auto& secondary : secondary_inputs) {
+                                secondary.reset();
+                            }
+                            save_menu.status = "LOADED";
+                        }
+                        if ((remap_controls.pressed
+                             & (starfox::input::b
+                                | starfox::input::start)) != 0U) {
+                            save_menu.active = false;
+                        }
+                        controls = {};
+                        secondary_controls = {};
+                    } else if (hud_editor.active) {
                         if ((remap_controls.pressed
                              & starfox::input::y) != 0U) {
                             hud_layouts[hud_profile_index(
@@ -3920,6 +4080,9 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
                 framebuffer.clear(0U);
                 planet_overlay.clear(0U);
                 planet_text_overlay.clear(0U);
+            }
+            if (save_menu.active) {
+                draw_save_state_menu(framebuffer, text_renderer, save_menu);
             }
             if (hud_editor.active) {
                 draw_hud_editor_chrome(framebuffer, text_renderer,

@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 
 namespace starfox::app {
 
@@ -26,6 +27,7 @@ public:
         right_shoulder,
         select,
         start,
+        menu,
         count,
     };
 
@@ -44,6 +46,16 @@ public:
 
     void set_visible(bool visible) noexcept { visible_ = visible; }
     [[nodiscard]] bool visible() const noexcept { return visible_; }
+
+    // Hides the pads while leaving the menu button reachable. A connected
+    // controller makes the pads redundant, but the player still needs a way
+    // to open the menu on a device with no keyboard.
+    void set_pads_hidden(bool hidden) noexcept { pads_hidden_ = hidden; }
+
+    // True once, for each press of the menu button.
+    [[nodiscard]] bool consume_menu_press() noexcept {
+        return std::exchange(menu_pressed_, false);
+    }
 
     // Drops every tracked finger, e.g. when the app loses focus mid-press.
     void release_all() noexcept;
@@ -78,6 +90,8 @@ private:
     float height_{1.0F};
     float unit_{1.0F};
     bool visible_{true};
+    bool pads_hidden_{};
+    bool menu_pressed_{};
 };
 
 } // namespace starfox::app

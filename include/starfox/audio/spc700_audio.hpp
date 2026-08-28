@@ -46,6 +46,11 @@ public:
     [[nodiscard]] std::vector<std::int16_t> render_logic_tick(
         std::span<const simulation::ApuPortWrite> writes);
 
+    // Exact emulator state, for save states. Restoring the simulation without
+    // this would leave the audio driver mid-phrase against a rewound game.
+    [[nodiscard]] std::vector<std::uint8_t> capture_state() const;
+    void restore_state(std::span<const std::uint8_t> state);
+
     [[nodiscard]] bool driver_loaded() const noexcept;
     [[nodiscard]] std::size_t uploaded_bytes() const noexcept;
     [[nodiscard]] std::array<std::uint8_t, 4> output_ports() const noexcept;

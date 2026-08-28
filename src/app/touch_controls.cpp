@@ -26,6 +26,7 @@ constexpr std::array<input::ButtonMask, TouchControls::control_count>
         input::Button::right_shoulder,
         input::Button::select,
         input::Button::start,
+        0U, // the menu button is host-side and sends no cartridge input
     };
 
 struct Rgba {
@@ -136,6 +137,11 @@ TouchControls::Region TouchControls::region(Control control) const noexcept {
     case Control::start:
         return {width_ - margin - unit_ * 0.75F, margin + unit_ * 0.32F,
             unit_ * 0.75F, unit_ * 0.32F, false};
+    // Centred at the top, clear of both thumb clusters, and the only control
+    // that survives set_pads_hidden.
+    case Control::menu:
+        return {width_ * 0.5F, margin + unit_ * 0.32F,
+            unit_ * 0.62F, unit_ * 0.32F, false};
     case Control::count:
         break;
     }
@@ -167,6 +173,7 @@ TouchControls::Control TouchControls::control_at(
     float x, float y) const noexcept {
     for (std::size_t index = 0; index < control_count; ++index) {
         const auto control = static_cast<Control>(index);
+        if (pads_hidden_ && control != Control::menu) continue;
         const auto area = region(control);
         if (area.half_width <= 0.0F) continue;
         const auto dx = x - area.x;
@@ -226,6 +233,7 @@ bool TouchControls::handle_event(const SDL_Event& event) noexcept {
         if (slot == nullptr) return false;
         const auto control = control_at(x, y);
         if (control == Control::count) return false;
+        if (control == Control::menu) menu_pressed_ = true;
         *slot = Touch{finger, control, mask_at(control, x, y), true};
         recompute_held();
         return true;
@@ -259,6 +267,7 @@ void TouchControls::render(SDL_Renderer* renderer) const {
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
     for (std::size_t index = 0; index < control_count; ++index) {
         const auto control = static_cast<Control>(index);
+        if (pads_hidden_ && control != Control::menu) continue;
         const auto area = region(control);
         if (area.half_width <= 0.0F) continue;
         const auto button = kControlButtons[index];
@@ -281,6 +290,7 @@ void TouchControls::render(SDL_Renderer* renderer) const {
             SDL_RenderRect(renderer, &rect);
         }
     }
+    if (pads_hidden_) return;
     // A crosshair marks the d-pad's rest position and its four cardinals.
     const auto pad = region(Control::dpad);
     set_color(renderer, kOutline);
