@@ -1,6 +1,6 @@
-# Star Fox Enhanced
+# Star Fox Enhanced for iOS
 
-A native Windows PC port of the open-source
+A native iOS port of the open-source
 [UltraStarFox](https://github.com/Sunlitspace542/ultrastarfox) codebase. It
 presents at a selectable 20, 30, 60, 90, 120, 240, 360, or 480 frames per
 second while preserving the original game's intended NTSC simulation speed
