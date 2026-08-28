@@ -104,6 +104,9 @@ TouchControls::Region TouchControls::region(Control control) const noexcept {
     const auto dpad_y = height_ - margin - dpad_radius;
     const auto face_x = width_ - margin - face_spread - face_radius;
     const auto face_y = height_ - margin - face_spread - face_radius;
+    const auto shoulder_half_w = unit_ * 0.9F;
+    const auto shoulder_half_h = unit_ * 0.42F;
+    const auto shoulder_gap = unit_ * 0.35F;
 
     switch (control) {
     case Control::dpad:
@@ -116,20 +119,22 @@ TouchControls::Region TouchControls::region(Control control) const noexcept {
         return {face_x, face_y - face_spread, face_radius, face_radius, true};
     case Control::y:
         return {face_x - face_spread, face_y, face_radius, face_radius, true};
+    // The shoulders sit directly above the thumb cluster on their own side,
+    // which is where an index finger naturally reaches on a real pad.
     case Control::left_shoulder:
-        return {margin + unit_ * 0.9F, margin + unit_ * 0.42F,
-            unit_ * 0.9F, unit_ * 0.42F, false};
+        return {dpad_x, dpad_y - dpad_radius - shoulder_gap - shoulder_half_h,
+            shoulder_half_w, shoulder_half_h, false};
     case Control::right_shoulder:
-        return {width_ - margin - unit_ * 0.9F, margin + unit_ * 0.42F,
-            unit_ * 0.9F, unit_ * 0.42F, false};
-    // A 4:3 presentation fills the screen vertically, so the only space that
-    // is not over the game is the two side bars. START and SELECT sit in the
-    // gap between each shoulder pad and the thumb cluster below it.
+        return {face_x,
+            face_y - face_spread - face_radius - shoulder_gap - shoulder_half_h,
+            shoulder_half_w, shoulder_half_h, false};
+    // START and SELECT are deliberately the furthest reach on the screen: they
+    // interrupt play, so they should not be next to anything held mid-game.
     case Control::select:
-        return {margin + unit_ * 0.9F, height_ * 0.45F,
+        return {margin + unit_ * 0.75F, margin + unit_ * 0.32F,
             unit_ * 0.75F, unit_ * 0.32F, false};
     case Control::start:
-        return {width_ - margin - unit_ * 0.9F, height_ * 0.45F,
+        return {width_ - margin - unit_ * 0.75F, margin + unit_ * 0.32F,
             unit_ * 0.75F, unit_ * 0.32F, false};
     case Control::count:
         break;

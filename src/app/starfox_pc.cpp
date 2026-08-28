@@ -1911,6 +1911,33 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
             hud_layout_path, hud_layouts));
         starfox::input::InputLatch input;
         std::array<starfox::input::InputLatch, 4> secondary_inputs{};
+        // Adopting a controller has to reset the secondary players' latches so
+        // a pad that arrives mid-press does not report a phantom transition.
+        const auto adopt_gamepads = [&] {
+            refresh_gamepads();
+            for (std::size_t player = 0; player < secondary_inputs.size();
+                 ++player) {
+                const auto held = player + 1U < gamepads.size()
+                    ? bindings.sample_gamepad_only(gamepads[player + 1U])
+                    : starfox::input::ButtonMask{};
+                secondary_inputs[player].reset(held);
+            }
+        };
+        // SDL discovers Game Controller devices asynchronously on iOS, so a
+        // pad is usually announced after SDL_Init returns - and the startup
+        // preroll below drains the event queue while handling only QUIT, which
+        // discards that announcement entirely. Reconciling against SDL's own
+        // list makes adoption independent of ever seeing the event. The
+        // comparison is against the previous count rather than the opened
+        // count, so a device that refuses to open is not retried every frame.
+        int observed_gamepad_count = -1;
+        const auto reconcile_gamepads = [&] {
+            int count = 0;
+            SDL_free(SDL_GetGamepads(&count));
+            if (count == observed_gamepad_count) return;
+            observed_gamepad_count = count;
+            adopt_gamepads();
+        };
         starfox::input::InputLatch remap_input;
         RemapMenuState remap_menu;
         HudEditorState hud_editor;
@@ -2140,14 +2167,10 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
 #endif
                 } else if (event.type == SDL_EVENT_GAMEPAD_ADDED
                            || event.type == SDL_EVENT_GAMEPAD_REMOVED) {
-                    refresh_gamepads();
-                    for (std::size_t player = 0;
-                         player < secondary_inputs.size(); ++player) {
-                        const auto held = player + 1U < gamepads.size()
-                            ? bindings.sample_gamepad_only(gamepads[player + 1U])
-                            : starfox::input::ButtonMask{};
-                        secondary_inputs[player].reset(held);
-                    }
+                    adopt_gamepads();
+                    int announced = 0;
+                    SDL_free(SDL_GetGamepads(&announced));
+                    observed_gamepad_count = announced;
                 }
                 if (hud_editor.active) {
                     const auto editor_width = display_width_for(
@@ -2445,6 +2468,7 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
             if (!test_unpaced && !advance_frozen_frame) {
                 pacer.wait_for_next_frame(game.presentation_fps());
             }
+            reconcile_gamepads();
             update_touch_visibility(gamepad != nullptr);
             auto sampled_buttons = sample_player_buttons(gamepad);
             for (const auto& press : scripted_presses) {
