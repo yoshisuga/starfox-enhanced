@@ -5,6 +5,7 @@
 #include "cpu/65816/cpu_65c816.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -236,7 +237,68 @@ struct Wdc65816::Impl {
     bool task_active{};
     std::uint32_t task_entry{};
     std::uint32_t task_return_sentinel{};
-    WDC65C816 cpu{&bus};
+    // WDC65C816 cannot be copied: CpuState holds a std::atomic interrupt
+    // latch. That latch is host-side bookkeeping rather than emulated machine
+    // state, so this box gives the core value semantics by transferring the
+    // architectural state through the core's own SaveState/LoadState - which
+    // is exactly what a save state has to capture anyway.
+    struct CpuBox {
+        WDC65C816 core;
+
+        explicit CpuBox(SystemBus* bus) : core(bus) {}
+        CpuBox(const CpuBox& other) : core(other.core.sys) { assign(other); }
+        CpuBox& operator=(const CpuBox& other) {
+            if (this != &other) assign(other);
+            return *this;
+        }
+
+        WDC65C816* operator->() noexcept { return &core; }
+        const WDC65C816* operator->() const noexcept { return &core; }
+
+    private:
+        // Copies the architectural state only. The core's SaveState is not
+        // used: it reinterprets a byte value as the destination pointer
+        // (`reinterpret_cast<SaveData*>((*out_data)[size])`) and crashes.
+        //
+        // Several members are deliberately not copied because they are
+        // self-referential and the freshly constructed core already has them
+        // pointing at itself: cpu_state.registers and cpu_state.data_segments
+        // address this object's own register file, and exec_info carries
+        // `this` as its callback context.
+        void assign(const CpuBox& other) {
+            auto& to = core.cpu_state;
+            const auto& from = other.core.cpu_state;
+            to.regs = from.regs;
+            to.data_segment_base = from.data_segment_base;
+            to.cycle = from.cycle;
+            to.cycle_stop = from.cycle_stop;
+            to.event_cycle = from.event_cycle;
+            to.code_segment_base = from.code_segment_base;
+            to.ip_mask = from.ip_mask;
+            to.ip = from.ip;
+            to.mode = from.mode;
+            to.zero = from.zero;
+            to.negative = from.negative;
+            to.interrupts = from.interrupts;
+            to.carry = from.carry;
+            to.other_flags = from.other_flags;
+            to.pending_interrupts.store(
+                from.pending_interrupts.load(std::memory_order_relaxed),
+                std::memory_order_relaxed);
+
+            core.mode_native_6502 = other.core.mode_native_6502;
+            core.mode_emulation = other.core.mode_emulation;
+            core.mode_long_a = other.core.mode_long_a;
+            core.mode_long_xy = other.core.mode_long_xy;
+            core.supports_decimal = other.core.supports_decimal;
+            core.fast_block_moves = other.core.fast_block_moves;
+            core.current_instruction_set = other.core.current_instruction_set;
+            core.num_emulated_instructions = other.core.num_emulated_instructions;
+            core.internal_cycle_timing = other.core.internal_cycle_timing;
+        }
+    };
+
+    CpuBox cpu{&bus};
 
     static bool is_io_device_address(void*, cpuaddr_t address) {
         const auto low = address & 0xffffU;
@@ -533,6 +595,34 @@ struct Wdc65816::Impl {
           font0wid(find_rom_symbol(symbols, "FONT0WID")),
           font0fon(find_rom_symbol(symbols, "FONT0FON")),
           font0trn(find_rom_symbol(symbols, "FONT0TRN")) {
+        bind_bus();
+
+        // Enter native mode through the architectural XCE instruction so the
+        // third-party core's private emulation flag changes normally.
+        write8(kBootstrap + 0U, 0x18U); // CLC
+        write8(kBootstrap + 1U, 0xfbU); // XCE
+        cpu->PowerOn();
+        cpu->SetRegister("pc", kBootstrap);
+        cpu->SingleStep();
+        cpu->SingleStep();
+        write8(kReturnSentinel, 0xeaU); // NOP; execution stops before this byte.
+    }
+
+    // Re-points everything a copy inherited from the object it was copied
+    // from. The page table holds raw pointers into the source's buffers, the
+    // bus holds the source's page array and IO context, and the CPU holds the
+    // source's bus, so all three have to be redirected before this machine is
+    // stepped.
+    void rebind_after_copy() {
+        bind_bus();
+        cpu->sys = &bus;
+    }
+
+    // Points the bus, page table and IO callbacks at this object's own
+    // buffers. Re-runnable: a copied machine inherits page entries and an IO
+    // context belonging to the object it was copied from, and must rebind
+    // before it is stepped or it would read and write the original's memory.
+    void bind_bus() {
         for (auto& page : pages) {
             page.ptr = nullptr;
             page.flags = 0;
@@ -574,8 +664,8 @@ struct Wdc65816::Impl {
             high_superfx_page.io_eq = 0x3000U;
         }
 
-        auto* rom_bytes = const_cast<std::uint8_t*>(rom_image.bytes().data());
-        const auto banks = static_cast<std::uint32_t>(rom_image.size() / 0x8000U);
+        auto* rom_bytes = const_cast<std::uint8_t*>(rom->bytes().data());
+        const auto banks = static_cast<std::uint32_t>(rom->size() / 0x8000U);
         for (std::uint32_t bank = 0; bank < banks && bank < 0x7eU; ++bank) {
             auto* bank_data = rom_bytes + bank * 0x8000U;
             bus.Map((bank << 16U) | 0x8000U, bank_data, 0x8000U, true);
@@ -592,16 +682,6 @@ struct Wdc65816::Impl {
         // of this bank, including addresses that would otherwise mirror ROM.
         bus.Map(kCartridgeRamBase, cartridge_ram.data(),
             static_cast<std::uint32_t>(cartridge_ram.size()));
-
-        // Enter native mode through the architectural XCE instruction so the
-        // third-party core's private emulation flag changes normally.
-        write8(kBootstrap + 0U, 0x18U); // CLC
-        write8(kBootstrap + 1U, 0xfbU); // XCE
-        cpu.PowerOn();
-        cpu.SetRegister("pc", kBootstrap);
-        cpu.SingleStep();
-        cpu.SingleStep();
-        write8(kReturnSentinel, 0xeaU); // NOP; execution stops before this byte.
     }
 
     std::uint8_t read8(std::uint32_t address) const {
@@ -2216,6 +2296,19 @@ Wdc65816::Wdc65816(
     : impl_(std::make_unique<Impl>(rom, symbols)) {}
 
 Wdc65816::~Wdc65816() = default;
+Wdc65816::Wdc65816(const Wdc65816& other)
+    : impl_{std::make_unique<Impl>(*other.impl_)} {
+    impl_->rebind_after_copy();
+}
+
+Wdc65816& Wdc65816::operator=(const Wdc65816& other) {
+    if (this != &other) {
+        impl_ = std::make_unique<Impl>(*other.impl_);
+        impl_->rebind_after_copy();
+    }
+    return *this;
+}
+
 Wdc65816::Wdc65816(Wdc65816&&) noexcept = default;
 Wdc65816& Wdc65816::operator=(Wdc65816&&) noexcept = default;
 
@@ -2388,28 +2481,28 @@ std::size_t Wdc65816::call(
     bool long_return) {
     impl_->task_active = false;
     auto& cpu = impl_->cpu;
-    cpu.SetRegister("p", registers.status);
-    cpu.SetRegister("a", registers.a);
-    cpu.SetRegister("x", registers.x);
-    cpu.SetRegister("y", registers.y);
-    cpu.SetRegister("d", registers.direct);
-    cpu.SetRegister("sp", registers.stack);
-    cpu.SetRegister("db", registers.data_bank);
+    cpu->SetRegister("p", registers.status);
+    cpu->SetRegister("a", registers.a);
+    cpu->SetRegister("x", registers.x);
+    cpu->SetRegister("y", registers.y);
+    cpu->SetRegister("d", registers.direct);
+    cpu->SetRegister("sp", registers.stack);
+    cpu->SetRegister("db", registers.data_bank);
     const auto return_sentinel = long_return
         ? kReturnSentinel
         : (address & 0xff0000U) | (kReturnSentinel & 0xffffU);
     if (long_return) {
-        cpu.Push(static_cast<std::uint8_t>(return_sentinel >> 16U));
+        cpu->Push(static_cast<std::uint8_t>(return_sentinel >> 16U));
     }
-    cpu.Push(static_cast<std::uint16_t>((kReturnSentinel & 0xffffU) - 1U));
-    cpu.SetRegister("pb", address >> 16U);
-    cpu.SetRegister("pc", address);
+    cpu->Push(static_cast<std::uint16_t>((kReturnSentinel & 0xffffU) - 1U));
+    cpu->SetRegister("pb", address >> 16U);
+    cpu->SetRegister("pc", address);
 
     std::size_t instructions = 0;
     std::array<std::uint32_t, 32> recent_program_counters{};
     std::vector<std::uint32_t> crash_entry_trace;
     std::uint32_t crash_entry{};
-    while (cpu.program_address() != return_sentinel) {
+    while (cpu->program_address() != return_sentinel) {
         // BGS.ASM's waittrans macro waits for the NMI-side transfer engine to
         // clear TRANS_FLAG at WRAM $0000. During a bounded subroutine call no
         // concurrent SNES NMI runs, so acknowledge those requests here when
@@ -2422,7 +2515,7 @@ std::size_t Wdc65816::call(
             std::ostringstream message;
             message << "65C816 subroutine at $" << std::hex << address
                     << " exceeded the instruction limit at $"
-                    << cpu.program_address() << " (recent";
+                    << cpu->program_address() << " (recent";
             const auto available = std::min(instructions, recent_program_counters.size());
             for (std::size_t age = available; age != 0; --age) {
                 const auto index = (instructions - age) % recent_program_counters.size();
@@ -2438,7 +2531,7 @@ std::size_t Wdc65816::call(
             }
             throw std::runtime_error{message.str()};
         }
-        const auto pc = cpu.program_address();
+        const auto pc = cpu->program_address();
         if (crash_entry == 0U
             && (pc == 0x1fdc9dU || pc == 0x1fdcaaU || pc == 0x1fdcb7U
                 || pc == 0x1fdcc4U || pc == 0x1fdcd1U)) {
@@ -2452,17 +2545,17 @@ std::size_t Wdc65816::call(
         }
         recent_program_counters[instructions % recent_program_counters.size()]
             = pc;
-        cpu.SingleStep();
+        cpu->SingleStep();
         ++instructions;
     }
 
-    registers.a = cpu.a();
-    registers.x = cpu.x();
-    registers.y = cpu.y();
-    registers.direct = cpu.cpu_state.regs.d.u16;
-    registers.stack = cpu.cpu_state.regs.sp.u16;
-    registers.data_bank = static_cast<std::uint8_t>(cpu.cpu_state.data_segment_base >> 16U);
-    registers.status = cpu.GetStatusRegister();
+    registers.a = cpu->a();
+    registers.x = cpu->x();
+    registers.y = cpu->y();
+    registers.direct = cpu->cpu_state.regs.d.u16;
+    registers.stack = cpu->cpu_state.regs.sp.u16;
+    registers.data_bank = static_cast<std::uint8_t>(cpu->cpu_state.data_segment_base >> 16U);
+    registers.status = cpu->GetStatusRegister();
     return instructions;
 }
 
@@ -2476,17 +2569,17 @@ Wdc65816TaskResult Wdc65816::begin_long_task(
     impl_->task_active = true;
     impl_->task_entry = address;
     impl_->task_return_sentinel = kReturnSentinel;
-    cpu.SetRegister("p", registers.status);
-    cpu.SetRegister("a", registers.a);
-    cpu.SetRegister("x", registers.x);
-    cpu.SetRegister("y", registers.y);
-    cpu.SetRegister("d", registers.direct);
-    cpu.SetRegister("sp", registers.stack);
-    cpu.SetRegister("db", registers.data_bank);
-    cpu.Push(static_cast<std::uint8_t>(kReturnSentinel >> 16U));
-    cpu.Push(static_cast<std::uint16_t>((kReturnSentinel & 0xffffU) - 1U));
-    cpu.SetRegister("pb", address >> 16U);
-    cpu.SetRegister("pc", address);
+    cpu->SetRegister("p", registers.status);
+    cpu->SetRegister("a", registers.a);
+    cpu->SetRegister("x", registers.x);
+    cpu->SetRegister("y", registers.y);
+    cpu->SetRegister("d", registers.direct);
+    cpu->SetRegister("sp", registers.stack);
+    cpu->SetRegister("db", registers.data_bank);
+    cpu->Push(static_cast<std::uint8_t>(kReturnSentinel >> 16U));
+    cpu->Push(static_cast<std::uint16_t>((kReturnSentinel & 0xffffU) - 1U));
+    cpu->SetRegister("pb", address >> 16U);
+    cpu->SetRegister("pc", address);
     return run_task(registers, stop_addresses, instruction_limit,
         service_transfer_flag);
 }
@@ -2502,17 +2595,17 @@ Wdc65816TaskResult Wdc65816::begin_near_task(
     impl_->task_entry = address;
     impl_->task_return_sentinel =
         (address & 0xff0000U) | (kReturnSentinel & 0xffffU);
-    cpu.SetRegister("p", registers.status);
-    cpu.SetRegister("a", registers.a);
-    cpu.SetRegister("x", registers.x);
-    cpu.SetRegister("y", registers.y);
-    cpu.SetRegister("d", registers.direct);
-    cpu.SetRegister("sp", registers.stack);
-    cpu.SetRegister("db", registers.data_bank);
-    cpu.Push(static_cast<std::uint16_t>(
+    cpu->SetRegister("p", registers.status);
+    cpu->SetRegister("a", registers.a);
+    cpu->SetRegister("x", registers.x);
+    cpu->SetRegister("y", registers.y);
+    cpu->SetRegister("d", registers.direct);
+    cpu->SetRegister("sp", registers.stack);
+    cpu->SetRegister("db", registers.data_bank);
+    cpu->Push(static_cast<std::uint16_t>(
         (impl_->task_return_sentinel & 0xffffU) - 1U));
-    cpu.SetRegister("pb", address >> 16U);
-    cpu.SetRegister("pc", address);
+    cpu->SetRegister("pb", address >> 16U);
+    cpu->SetRegister("pc", address);
     return run_task(registers, stop_addresses, instruction_limit,
         service_transfer_flag);
 }
@@ -2539,7 +2632,7 @@ Wdc65816TaskResult Wdc65816::run_task(
     std::array<std::uint32_t, 32> recent_program_counters{};
     bool executed_instruction = false;
     while (true) {
-        const auto pc = cpu.program_address();
+        const auto pc = cpu->program_address();
         if (pc == impl_->task_return_sentinel) {
             impl_->task_active = false;
             result.returned = true;
@@ -2573,19 +2666,19 @@ Wdc65816TaskResult Wdc65816::run_task(
         }
         recent_program_counters[
             result.instructions % recent_program_counters.size()] = pc;
-        cpu.SingleStep();
+        cpu->SingleStep();
         ++result.instructions;
         executed_instruction = true;
     }
 
-    registers.a = cpu.a();
-    registers.x = cpu.x();
-    registers.y = cpu.y();
-    registers.direct = cpu.cpu_state.regs.d.u16;
-    registers.stack = cpu.cpu_state.regs.sp.u16;
+    registers.a = cpu->a();
+    registers.x = cpu->x();
+    registers.y = cpu->y();
+    registers.direct = cpu->cpu_state.regs.d.u16;
+    registers.stack = cpu->cpu_state.regs.sp.u16;
     registers.data_bank = static_cast<std::uint8_t>(
-        cpu.cpu_state.data_segment_base >> 16U);
-    registers.status = cpu.GetStatusRegister();
+        cpu->cpu_state.data_segment_base >> 16U);
+    registers.status = cpu->GetStatusRegister();
     return result;
 }
 

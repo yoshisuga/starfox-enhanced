@@ -9,6 +9,25 @@
 #include <stdexcept>
 
 namespace starfox::simulation {
+
+std::unique_ptr<GameSimulation> GameSimulation::clone() const {
+    // Not make_unique: the copy constructor is private to this class.
+    auto copy = std::unique_ptr<GameSimulation>{new GameSimulation{*this}};
+    copy->rebind_internal_pointers();
+    return copy;
+}
+
+void GameSimulation::restore_from(const GameSimulation& snapshot) {
+    if (this == &snapshot) return;
+    static_cast<GameSimulation&>(*this) =
+        static_cast<const GameSimulation&>(snapshot);
+    rebind_internal_pointers();
+}
+
+void GameSimulation::rebind_internal_pointers() noexcept {
+    map_.rebind(objects_);
+    strategies_.rebind(objects_, map_);
+}
 namespace {
 
 constexpr std::array<std::uint16_t, 8> kPresentationRates{

@@ -209,6 +209,13 @@ private:
     void execute_mapcode_jsl();
     [[nodiscard]] bool execute_native_condition(std::uint32_t address);
     void sync_map_state_to_cpu();
+
+public:
+    // A copied machine still points at the object pool belonging to the
+    // simulation it was copied from; the new owner must redirect it.
+    void rebind(ObjectPool& objects) noexcept { objects_ = &objects; }
+
+private:
     void sync_display_from_cpu() noexcept;
     void sync_display_to_cpu();
 

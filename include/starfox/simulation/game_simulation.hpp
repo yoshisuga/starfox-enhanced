@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <array>
 #include <optional>
 #include <span>
@@ -174,6 +175,19 @@ public:
         const std::string& initial_map = "LEVEL1_1",
         std::span<const std::uint8_t> cartridge_ram = {});
 
+    // Save state support. The sub-objects hold raw pointers into their owner,
+    // so a bare copy would drive the original's object pool; both entry points
+    // below repair those pointers, and the copy operations themselves are
+    // private so a caller cannot obtain an unrepaired copy by accident.
+    //
+    // The result is heap-allocated because the pointers are repaired to point
+    // at a specific address: moving a simulation would strand them again.
+    [[nodiscard]] std::unique_ptr<GameSimulation> clone() const;
+    void restore_from(const GameSimulation& snapshot);
+
+    GameSimulation(GameSimulation&&) = delete;
+    GameSimulation& operator=(GameSimulation&&) = delete;
+
     [[nodiscard]] GameTickResult tick(const input::TickInput& input);
     void present_frame();
     void start_map(const std::string& symbol);
@@ -289,6 +303,17 @@ private:
         planet_briefing,
         planet_fade_to_level,
     };
+
+    // Defaulted, and private: every copy has to go through clone() or
+    // restore_from(), which repair the internal pointers afterwards.
+    GameSimulation(const GameSimulation&) = default;
+    GameSimulation& operator=(const GameSimulation&) = default;
+
+    // Redirects every internal pointer at this instance. The set is closed and
+    // visible in the members below: the object pool, the map machine and the
+    // strategy scheduler. The ROM and symbol pointers are deliberately left
+    // alone - they reference immutable assets shared by every simulation.
+    void rebind_internal_pointers() noexcept;
 
     [[nodiscard]] std::uint32_t rom_symbol(const std::string& name) const;
     [[nodiscard]] std::uint32_t ram_symbol(const std::string& name) const;

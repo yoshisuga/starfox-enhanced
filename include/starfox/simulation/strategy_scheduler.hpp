@@ -33,6 +33,13 @@ public:
     [[nodiscard]] std::size_t tick_object(ObjectHandle object);
     [[nodiscard]] std::size_t begin_tick();
 
+    // A copied scheduler still points at the pool and machine belonging to the
+    // simulation it was copied from; the new owner must redirect it.
+    void rebind(ObjectPool& objects, MapVm& native_state) noexcept {
+        objects_ = &objects;
+        native_state_ = &native_state;
+    }
+
 private:
     ObjectPool* objects_{};
     MapVm* native_state_{};

@@ -332,6 +332,9 @@ if(STARFOX_BUILD_TESTS)
     target_link_libraries(starfox_simulation_tests PRIVATE starfox_core)
     add_test(NAME starfox_simulation_tests COMMAND starfox_simulation_tests)
 
+    add_executable(starfox_save_state_tests tests/save_state_tests.cpp)
+    target_link_libraries(starfox_save_state_tests PRIVATE starfox_core)
+
     if(STARFOX_BUILD_RUNTIME)
         add_executable(starfox_runtime_input_tests
             tests/runtime_input_tests.cpp
@@ -349,6 +352,12 @@ if(STARFOX_BUILD_TESTS)
         add_test(
             NAME starfox_upstream_shape_coverage
             COMMAND starfox_shape_coverage
+                    "${CMAKE_CURRENT_SOURCE_DIR}/upstream-ultrastarfox/SF.SFC"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/upstream-ultrastarfox/SYMBOLS.TXT"
+        )
+        add_test(
+            NAME starfox_upstream_save_state
+            COMMAND starfox_save_state_tests
                     "${CMAKE_CURRENT_SOURCE_DIR}/upstream-ultrastarfox/SF.SFC"
                     "${CMAKE_CURRENT_SOURCE_DIR}/upstream-ultrastarfox/SYMBOLS.TXT"
         )

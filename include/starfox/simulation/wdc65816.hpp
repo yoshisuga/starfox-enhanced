@@ -67,8 +67,12 @@ public:
     ~Wdc65816();
     Wdc65816(Wdc65816&&) noexcept;
     Wdc65816& operator=(Wdc65816&&) noexcept;
-    Wdc65816(const Wdc65816&) = delete;
-    Wdc65816& operator=(const Wdc65816&) = delete;
+    // Copying yields an independent machine with the same memory, registers
+    // and device state, which is what a save state needs. The copy rebinds its
+    // bus, page table and IO callbacks to its own buffers; without that it
+    // would silently read and write the original's memory.
+    Wdc65816(const Wdc65816&);
+    Wdc65816& operator=(const Wdc65816&);
 
     [[nodiscard]] std::uint8_t read8(std::uint32_t address) const;
     [[nodiscard]] std::uint16_t read16(std::uint32_t address) const;
