@@ -30,8 +30,10 @@
 #include <chrono>
 #include <cmath>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <cstdint>
 #include <filesystem>
@@ -358,11 +360,15 @@ void write_asset_companion(
     auto temporary = path;
     temporary += ".tmp";
     {
+        errno = 0;
         std::ofstream stream{temporary,
             std::ios::binary | std::ios::trunc};
         if (!stream) {
+            // errno names the real cause; the path alone never has.
+            const auto reason = errno != 0
+                ? std::string{std::strerror(errno)} : std::string{"unknown"};
             throw std::runtime_error{
-                "unable to create asset companion: " + path.string()};
+                "unable to create " + temporary.string() + ": " + reason};
         }
         stream.write(reinterpret_cast<const char*>(bytes.data()),
             static_cast<std::streamsize>(bytes.size()));
@@ -1315,11 +1321,53 @@ struct HudEditorState {
     float grab_y{};
 };
 
+// Save states live beside the other user data. If that location cannot be
+// written - which is what the first iOS build hit - the preferences container
+// is used instead, since a working save in a less discoverable place beats a
+// failed one. The fallback is logged rather than applied silently.
+std::filesystem::path save_state_directory() {
+    static const auto directory = [] {
+        const auto probe = [](const std::filesystem::path& candidate) {
+            if (candidate.empty()) return false;
+            std::error_code error;
+            std::filesystem::create_directories(candidate, error);
+            if (error) return false;
+            const auto token = candidate / ".starfox-write-probe";
+            std::ofstream stream{token};
+            if (!stream) return false;
+            stream.close();
+            std::filesystem::remove(token, error);
+            return true;
+        };
+
+        const auto settings = starfox::app::pregame_settings_path();
+        if (!settings.empty() && probe(settings.parent_path())) {
+            return settings.parent_path();
+        }
+        SDL_Log("STARFOX save states: documents folder is not writable (%s)",
+            settings.empty() ? "no path" : settings.parent_path().string().c_str());
+
+        std::filesystem::path preferences;
+        if (char* path = SDL_GetPrefPath("StarFoxEnhanced", "StarFoxEnhanced");
+            path != nullptr) {
+            preferences = path;
+            SDL_free(path);
+        }
+        if (probe(preferences)) {
+            SDL_Log("STARFOX save states: using %s",
+                preferences.string().c_str());
+            return preferences;
+        }
+        SDL_Log("STARFOX save states: no writable location found");
+        return std::filesystem::path{};
+    }();
+    return directory;
+}
+
 std::filesystem::path save_state_path(std::size_t slot) {
-    const auto settings = starfox::app::pregame_settings_path();
-    if (settings.empty()) return {};
-    return settings.parent_path()
-        / ("save-state-" + std::to_string(slot + 1U) + ".bin");
+    const auto directory = save_state_directory();
+    if (directory.empty()) return {};
+    return directory / ("save-state-" + std::to_string(slot + 1U) + ".bin");
 }
 
 // The settings folder is created lazily by whatever writes into it first, and
@@ -1329,12 +1377,19 @@ void ensure_parent_directory(const std::filesystem::path& path) {
         throw std::runtime_error{"no writable location for save states"};
     }
     std::error_code error;
-    std::filesystem::create_directories(path.parent_path(), error);
+    const auto parent = path.parent_path();
+    std::filesystem::create_directories(parent, error);
     if (error) {
         throw std::runtime_error{
-            "could not create " + path.parent_path().string() + ": "
-            + error.message()};
+            "could not create " + parent.string() + ": " + error.message()};
     }
+    std::error_code status_error;
+    const auto status = std::filesystem::status(parent, status_error);
+    SDL_Log("STARFOX save dir: %s exists=%d directory=%d perms=%o",
+        parent.string().c_str(),
+        std::filesystem::exists(status) ? 1 : 0,
+        std::filesystem::is_directory(status) ? 1 : 0,
+        static_cast<unsigned>(status.permissions()));
 }
 
 // Slots are distinguished by when they were taken; a scene name would be
