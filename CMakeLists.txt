@@ -237,6 +237,12 @@ if(STARFOX_BUILD_RUNTIME)
             MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
             MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
             XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+            # Xcode only places a product into an archive when it has an
+            # install location and is not skipped. CMake leaves both unset, so
+            # without these an archive builds "successfully" and contains no
+            # application at all, which is what breaks IPA export.
+            XCODE_ATTRIBUTE_INSTALL_PATH "$(LOCAL_APPS_DIR)"
+            XCODE_ATTRIBUTE_SKIP_INSTALL "NO"
             XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "${STARFOX_IOS_CODE_SIGN_IDENTITY}"
             XCODE_ATTRIBUTE_CODE_SIGN_STYLE "${STARFOX_IOS_CODE_SIGN_STYLE}"
             XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${STARFOX_IOS_DEVELOPMENT_TEAM}")
