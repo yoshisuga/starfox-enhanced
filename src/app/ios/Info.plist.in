@@ -51,5 +51,14 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<!-- Declares that the game drives its own controller UI. Without this the
+	     system treats a controller's Menu button as a gesture of its own and
+	     never delivers it, so START would be swallowed on a paired pad. -->
+	<key>GCSupportsControllerUserInteraction</key>
+	<true/>
+	<!-- Controllers are supported but never required: the on-screen pads stay
+	     available, so the app must not be listed as controller-only. -->
+	<key>GCRequiresControllerUserInteraction</key>
+	<false/>
 </dict>
 </plist>
