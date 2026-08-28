@@ -956,6 +956,7 @@ GameTickResult GameSimulation::tick_pregame_menu(
     }
 
     const auto change_experience = pregame_selection_ == 0U
+        && starfox_ex_available_
         && (input.pressed & (starfox::input::left | starfox::input::right
             | starfox::input::select | starfox::input::a
             | starfox::input::b)) != 0U;

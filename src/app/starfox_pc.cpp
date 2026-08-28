@@ -1611,8 +1611,9 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
             std::exchange(launch_hud_editor_preview, false);
         if (active_experience == starfox::simulation::Experience::starfox_ex
             && !starfox_ex_assets) {
-            throw std::runtime_error{
-                "Star Fox EX runtime assets are not installed in this build"};
+            // A pre-game settings file can outlive the build that wrote it.
+            // Star Fox EX being absent is not a reason to refuse to start.
+            active_experience = starfox::simulation::Experience::original;
         }
         const auto& assets = active_experience
                 == starfox::simulation::Experience::starfox_ex
@@ -1627,6 +1628,7 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
             : std::span<const std::uint8_t>{};
         starfox::simulation::GameSimulation game{
             rom, symbols, initial_map, initial_ex_save};
+        game.set_starfox_ex_available(starfox_ex_assets.has_value());
         auto warned_ex_save_failure = false;
         const auto synchronize_ex_save = [&] {
             if (active_experience

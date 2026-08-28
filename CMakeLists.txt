@@ -20,6 +20,8 @@ set(STARFOX_IOS_DEVELOPMENT_TEAM ""
     CACHE STRING "Apple Development team ID used to sign the iOS application")
 set(STARFOX_IOS_CODE_SIGN_IDENTITY "Apple Development"
     CACHE STRING "Code signing identity for the iOS application")
+set(STARFOX_IOS_CODE_SIGN_STYLE "Automatic"
+    CACHE STRING "Xcode signing style for the iOS application")
 option(STARFOX_EMBED_RUNTIME_ASSETS
     "Embed source-built BPS deltas and symbol tables into the Windows runtime" ON)
 set(STARFOX_ROM_FILE
@@ -236,6 +238,7 @@ if(STARFOX_BUILD_RUNTIME)
             MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
             XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
             XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "${STARFOX_IOS_CODE_SIGN_IDENTITY}"
+            XCODE_ATTRIBUTE_CODE_SIGN_STYLE "${STARFOX_IOS_CODE_SIGN_STYLE}"
             XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${STARFOX_IOS_DEVELOPMENT_TEAM}")
     endif()
     if(WIN32 AND STARFOX_EMBED_RUNTIME_ASSETS)

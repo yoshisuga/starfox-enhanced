@@ -199,6 +199,17 @@ public:
     void set_timing_mode(TimingMode mode) noexcept { timing_mode_ = mode; }
     [[nodiscard]] Experience experience() const noexcept { return experience_; }
     void set_experience(Experience experience) noexcept { experience_ = experience; }
+
+    // Star Fox EX needs its own ROM and symbol table, which a build may not
+    // ship. When it is unavailable the pre-game menu stops offering it rather
+    // than letting the player select an experience that cannot be started.
+    [[nodiscard]] bool starfox_ex_available() const noexcept {
+        return starfox_ex_available_;
+    }
+    void set_starfox_ex_available(bool available) noexcept {
+        starfox_ex_available_ = available;
+        if (!available) experience_ = Experience::original;
+    }
     [[nodiscard]] DisplayMode display_mode() const noexcept { return display_mode_; }
     void set_display_mode(DisplayMode mode) noexcept { display_mode_ = mode; }
     [[nodiscard]] std::uint16_t presentation_fps() const noexcept {
@@ -735,6 +746,7 @@ private:
     std::uint8_t pregame_selection_{};
     PregamePage pregame_page_{PregamePage::main};
     Experience experience_{Experience::original};
+    bool starfox_ex_available_{true};
     bool god_mode_{};
     bool show_fps_{};
     CrosshairColour crosshair_colour_{CrosshairColour::green};
