@@ -338,7 +338,8 @@ if(STARFOX_BUILD_TESTS)
     if(STARFOX_BUILD_RUNTIME)
         add_executable(starfox_runtime_input_tests
             tests/runtime_input_tests.cpp
-            src/app/runtime_input.cpp)
+            src/app/runtime_input.cpp
+            src/app/touch_controls.cpp)
         target_link_libraries(
             starfox_runtime_input_tests PRIVATE starfox_core SDL3::SDL3)
         add_test(NAME starfox_runtime_input_tests COMMAND starfox_runtime_input_tests)

@@ -1322,6 +1322,21 @@ std::filesystem::path save_state_path(std::size_t slot) {
         / ("save-state-" + std::to_string(slot + 1U) + ".bin");
 }
 
+// The settings folder is created lazily by whatever writes into it first, and
+// on a fresh install that may not have happened yet.
+void ensure_parent_directory(const std::filesystem::path& path) {
+    if (path.empty()) {
+        throw std::runtime_error{"no writable location for save states"};
+    }
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (error) {
+        throw std::runtime_error{
+            "could not create " + path.parent_path().string() + ": "
+            + error.message()};
+    }
+}
+
 // Slots are distinguished by when they were taken; a scene name would be
 // wrong the moment the player crosses a transition.
 std::string describe_now() {
@@ -2064,8 +2079,8 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
         // gives the screen back rather than sitting on top of the game.
         const auto update_touch_visibility = [&](bool has_gamepad) {
 #if defined(STARFOX_BUNDLED_ASSETS)
+            // Idempotent, and safe to call every frame.
             touch_controls.set_pads_hidden(has_gamepad);
-            touch_controls.release_all();
 #else
             static_cast<void>(has_gamepad);
 #endif
@@ -2766,13 +2781,16 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
                                 file.simulation = game.save_state();
                                 file.audio = audio.capture_audio_state();
                                 file.label = describe_now();
+                                const auto path =
+                                    save_state_path(save_menu.selection);
+                                ensure_parent_directory(path);
                                 write_asset_companion(
-                                    save_state_path(save_menu.selection),
-                                    encode_save_state(file, cartridge_id));
+                                    path, encode_save_state(file, cartridge_id));
                                 slot.present = true;
                                 slot.label = file.label;
                                 save_menu.status = "SAVED";
-                            } catch (const std::exception&) {
+                            } catch (const std::exception& error) {
+                                SDL_Log("STARFOX save failed: %s", error.what());
                                 save_menu.status = "SAVE FAILED";
                             }
                         }
@@ -2794,7 +2812,8 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
                                     secondary.reset();
                                 }
                                 save_menu.status = "LOADED";
-                            } catch (const std::exception&) {
+                            } catch (const std::exception& error) {
+                                SDL_Log("STARFOX load failed: %s", error.what());
                                 save_menu.status = "LOAD FAILED";
                             }
                         }

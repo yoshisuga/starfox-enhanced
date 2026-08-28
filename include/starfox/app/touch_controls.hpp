@@ -50,7 +50,15 @@ public:
     // Hides the pads while leaving the menu button reachable. A connected
     // controller makes the pads redundant, but the player still needs a way
     // to open the menu on a device with no keyboard.
-    void set_pads_hidden(bool hidden) noexcept { pads_hidden_ = hidden; }
+    // Safe to call every frame: releasing the tracked fingers happens only on
+    // an actual change. Doing it unconditionally would clear every held
+    // button before it could be sampled, which reads as dead controls.
+    void set_pads_hidden(bool hidden) noexcept {
+        if (hidden == pads_hidden_) return;
+        pads_hidden_ = hidden;
+        release_all();
+    }
+    [[nodiscard]] bool pads_hidden() const noexcept { return pads_hidden_; }
 
     // True once, for each press of the menu button.
     [[nodiscard]] bool consume_menu_press() noexcept {

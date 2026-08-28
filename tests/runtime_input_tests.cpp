@@ -1,4 +1,5 @@
 #include "starfox/app/runtime_input.hpp"
+#include "starfox/app/touch_controls.hpp"
 #include "starfox/input/buttons.hpp"
 
 #include <SDL3/SDL.h>
@@ -238,6 +239,47 @@ int main() {
     std::error_code layout_remove_error;
     std::filesystem::remove(layout_test_path, layout_remove_error);
     require(!layout_remove_error, "HUD layout test file could not be removed");
+
+    // Touch overlay. The pads-hidden flag is polled every frame, so it must be
+    // idempotent: an earlier revision released the tracked fingers on every
+    // call, which cleared every held button before it could be sampled and
+    // left the on-screen controls completely dead.
+    {
+        starfox::app::TouchControls touch;
+        touch.set_viewport(2556, 1179);
+
+        SDL_Event press{};
+        press.type = SDL_EVENT_FINGER_DOWN;
+        press.tfinger.fingerID = 1;
+        // Left of the d-pad centre, clear of its deadzone. The pad is a
+        // circle of radius 1.35 units centred one radius in from the margin.
+        press.tfinger.x = 186.0F / 2556.0F;
+        press.tfinger.y = 854.0F / 1179.0F;
+        require(touch.handle_event(press), "the d-pad did not accept a touch");
+        const auto held = touch.held();
+        require(held != 0U, "a touch on the d-pad produced no buttons");
+
+        for (int frame = 0; frame < 10; ++frame) {
+            touch.set_pads_hidden(false);
+        }
+        require(touch.held() == held,
+                "repeating the pads-hidden state cleared the held buttons");
+
+        touch.set_pads_hidden(true);
+        require(touch.held() == 0U,
+                "hiding the pads did not release the tracked fingers");
+        touch.set_pads_hidden(false);
+
+        SDL_Event menu{};
+        menu.type = SDL_EVENT_FINGER_DOWN;
+        menu.tfinger.fingerID = 2;
+        menu.tfinger.x = 0.5F;
+        menu.tfinger.y = 149.0F / 1179.0F;
+        require(touch.handle_event(menu), "the menu button did not accept a touch");
+        require(touch.consume_menu_press(), "the menu press was not reported");
+        require(!touch.consume_menu_press(),
+                "the menu press was reported more than once");
+    }
 
     require(SDL_DetachVirtualJoystick(second_identifier),
             "second virtual XInput gamepad could not be detached");
