@@ -341,6 +341,57 @@ std::vector<ScriptedPress> parse_scripted_presses(const char* text) {
     return result;
 }
 
+std::vector<std::uint8_t> read_binary_file(
+    const std::filesystem::path& path) {
+    std::ifstream stream{path, std::ios::binary};
+    if (!stream) {
+        throw std::runtime_error{"unable to open file: " + path.string()};
+    }
+    return {
+        std::istreambuf_iterator<char>{stream},
+        std::istreambuf_iterator<char>{},
+    };
+}
+void write_asset_companion(
+    const std::filesystem::path& path,
+    std::span<const std::uint8_t> bytes) {
+    auto temporary = path;
+    temporary += ".tmp";
+    {
+        std::ofstream stream{temporary,
+            std::ios::binary | std::ios::trunc};
+        if (!stream) {
+            throw std::runtime_error{
+                "unable to create asset companion: " + path.string()};
+        }
+        stream.write(reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+        if (!stream) {
+            throw std::runtime_error{
+                "unable to write asset companion: " + path.string()};
+        }
+    }
+#if defined(_WIN32)
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const auto error = GetLastError();
+        static_cast<void>(DeleteFileW(temporary.c_str()));
+        throw std::runtime_error{
+            "unable to install asset companion (Windows error "
+            + std::to_string(error) + "): " + path.string()};
+    }
+#else
+    std::error_code error;
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        std::filesystem::remove(temporary, error);
+        throw std::runtime_error{
+            "unable to install asset companion (" + error.message()
+            + "): " + path.string()};
+    }
+#endif
+}
+
 #if defined(STARFOX_HAS_EMBEDDED_ASSETS)
 #if defined(STARFOX_BUNDLED_ASSETS)
 // An app bundle has no resource section, so the same asset identifiers map to
@@ -431,17 +482,7 @@ std::filesystem::path sandbox_documents_directory() {
 }
 #endif
 
-std::vector<std::uint8_t> read_binary_file(
-    const std::filesystem::path& path) {
-    std::ifstream stream{path, std::ios::binary};
-    if (!stream) {
-        throw std::runtime_error{"unable to open file: " + path.string()};
-    }
-    return {
-        std::istreambuf_iterator<char>{stream},
-        std::istreambuf_iterator<char>{},
-    };
-}
+
 
 std::vector<std::uint8_t> load_retail_v12(
     const std::filesystem::path& path) {
@@ -552,45 +593,7 @@ RuntimeAssetSet unpack_runtime_assets(
     };
 }
 
-void write_asset_companion(
-    const std::filesystem::path& path,
-    std::span<const std::uint8_t> bytes) {
-    auto temporary = path;
-    temporary += ".tmp";
-    {
-        std::ofstream stream{temporary,
-            std::ios::binary | std::ios::trunc};
-        if (!stream) {
-            throw std::runtime_error{
-                "unable to create asset companion: " + path.string()};
-        }
-        stream.write(reinterpret_cast<const char*>(bytes.data()),
-            static_cast<std::streamsize>(bytes.size()));
-        if (!stream) {
-            throw std::runtime_error{
-                "unable to write asset companion: " + path.string()};
-        }
-    }
-#if defined(_WIN32)
-    if (!MoveFileExW(temporary.c_str(), path.c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        const auto error = GetLastError();
-        static_cast<void>(DeleteFileW(temporary.c_str()));
-        throw std::runtime_error{
-            "unable to install asset companion (Windows error "
-            + std::to_string(error) + "): " + path.string()};
-    }
-#else
-    std::error_code error;
-    std::filesystem::rename(temporary, path, error);
-    if (error) {
-        std::filesystem::remove(temporary, error);
-        throw std::runtime_error{
-            "unable to install asset companion (" + error.message()
-            + "): " + path.string()};
-    }
-#endif
-}
+
 
 RuntimeAssets load_external_assets(
     const std::filesystem::path& rom_path,
@@ -1209,17 +1212,82 @@ private:
     std::uint32_t presentation_hz_{starfox::timing::kPresentationHz};
 };
 
-// A save state slot. The simulation is held by pointer because its internal
-// pointers are repaired to a fixed address and it must not be relocated.
+// A save state slot. Slots live on disk so they survive relaunch; the file is
+// the state, and this is only what the menu needs to describe it.
 struct SaveSlot {
-    std::unique_ptr<starfox::simulation::GameSimulation> simulation;
-    std::vector<std::uint8_t> audio;
+    bool present{};
     std::string label;
 
-    [[nodiscard]] bool occupied() const noexcept {
-        return simulation != nullptr;
-    }
+    [[nodiscard]] bool occupied() const noexcept { return present; }
 };
+
+// "SFS" plus a format revision. The revision is bumped whenever the payload
+// layout changes, so an older state is refused rather than misread: the
+// generated visitors mean the layout tracks the source, and a state written
+// by a different build describes different fields.
+constexpr std::array<char, 4> kSaveStateMagic{'S', 'F', 'S', '2'};
+
+struct SaveStateFile {
+    std::vector<std::uint8_t> simulation;
+    std::vector<std::uint8_t> audio;
+    std::string label;
+};
+
+void append_block(std::vector<std::uint8_t>& out, const void* data,
+    std::size_t size) {
+    const auto encoded = static_cast<std::uint64_t>(size);
+    const auto* length = reinterpret_cast<const std::uint8_t*>(&encoded);
+    out.insert(out.end(), length, length + sizeof(encoded));
+    const auto* bytes = static_cast<const std::uint8_t*>(data);
+    out.insert(out.end(), bytes, bytes + size);
+}
+
+[[nodiscard]] std::vector<std::uint8_t> encode_save_state(
+    const SaveStateFile& file, std::uint32_t cartridge_id) {
+    std::vector<std::uint8_t> out;
+    out.insert(out.end(), kSaveStateMagic.begin(), kSaveStateMagic.end());
+    const auto* id = reinterpret_cast<const std::uint8_t*>(&cartridge_id);
+    out.insert(out.end(), id, id + sizeof(cartridge_id));
+    append_block(out, file.label.data(), file.label.size());
+    append_block(out, file.simulation.data(), file.simulation.size());
+    append_block(out, file.audio.data(), file.audio.size());
+    return out;
+}
+
+[[nodiscard]] SaveStateFile decode_save_state(
+    std::span<const std::uint8_t> bytes, std::uint32_t cartridge_id) {
+    std::size_t cursor = 0;
+    const auto take = [&bytes, &cursor](std::size_t size) {
+        if (cursor + size > bytes.size()) {
+            throw std::runtime_error{"save state file is truncated"};
+        }
+        const auto* data = bytes.data() + cursor;
+        cursor += size;
+        return data;
+    };
+    const auto* magic = take(kSaveStateMagic.size());
+    if (!std::equal(kSaveStateMagic.begin(), kSaveStateMagic.end(), magic)) {
+        throw std::runtime_error{
+            "not a save state, or written by an incompatible version"};
+    }
+    std::uint32_t stored_id{};
+    std::memcpy(&stored_id, take(sizeof(stored_id)), sizeof(stored_id));
+    if (stored_id != cartridge_id) {
+        // Addresses and field meanings belong to one assembled cartridge.
+        throw std::runtime_error{"save state belongs to a different ROM"};
+    }
+    const auto block = [&](auto& destination) {
+        std::uint64_t size{};
+        std::memcpy(&size, take(sizeof(size)), sizeof(size));
+        const auto* data = take(static_cast<std::size_t>(size));
+        destination.assign(data, data + size);
+    };
+    SaveStateFile file;
+    block(file.label);
+    block(file.simulation);
+    block(file.audio);
+    return file;
+}
 
 struct SaveStateMenuState {
     static constexpr std::size_t slot_count = 4U;
@@ -1246,6 +1314,13 @@ struct HudEditorState {
     float grab_x{};
     float grab_y{};
 };
+
+std::filesystem::path save_state_path(std::size_t slot) {
+    const auto settings = starfox::app::pregame_settings_path();
+    if (settings.empty()) return {};
+    return settings.parent_path()
+        / ("save-state-" + std::to_string(slot + 1U) + ".bin");
+}
 
 // Slots are distinguished by when they were taken; a scene name would be
 // wrong the moment the player crosses a transition.
@@ -1722,6 +1797,10 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
                 == starfox::simulation::Experience::starfox_ex
             ? *starfox_ex_assets : original_assets;
         const auto& rom = assets.rom;
+        // Binds a save state to the exact assembled cartridge it came from.
+        // Field meanings and addresses belong to one build; a state from
+        // another would decode into plausible nonsense.
+        const auto cartridge_id = starfox::assets::crc32(rom.bytes());
         const auto& symbols = assets.symbols;
         const starfox::assets::ShapeDecoder decoder{rom, symbols};
         const auto trigonometry = starfox::simulation::TrigTables::load(rom, symbols);
@@ -2044,6 +2123,19 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
         RemapMenuState remap_menu;
         SaveStateMenuState save_menu;
         save_menu.active = std::getenv("STARFOX_TEST_SAVE_MENU") != nullptr;
+        for (std::size_t slot = 0; slot < save_menu.slots.size(); ++slot) {
+            const auto path = save_state_path(slot);
+            if (path.empty() || !std::filesystem::is_regular_file(path)) continue;
+            try {
+                const auto file = decode_save_state(
+                    read_binary_file(path), cartridge_id);
+                save_menu.slots[slot].present = true;
+                save_menu.slots[slot].label = file.label;
+            } catch (const std::exception&) {
+                // A state from another build or a truncated file stays hidden
+                // rather than offering the player a load that cannot work.
+            }
+        }
         HudEditorState hud_editor;
         hud_editor.active = hud_editor_preview;
         bool running = true;
@@ -2669,23 +2761,42 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
                         auto& slot = save_menu.slots[save_menu.selection];
                         if ((remap_controls.pressed
                              & starfox::input::a) != 0U) {
-                            slot.simulation = game.clone();
-                            slot.audio = audio.capture_audio_state();
-                            slot.label = describe_now();
-                            save_menu.status = "SAVED";
+                            try {
+                                SaveStateFile file;
+                                file.simulation = game.save_state();
+                                file.audio = audio.capture_audio_state();
+                                file.label = describe_now();
+                                write_asset_companion(
+                                    save_state_path(save_menu.selection),
+                                    encode_save_state(file, cartridge_id));
+                                slot.present = true;
+                                slot.label = file.label;
+                                save_menu.status = "SAVED";
+                            } catch (const std::exception&) {
+                                save_menu.status = "SAVE FAILED";
+                            }
                         }
                         if ((remap_controls.pressed
                              & starfox::input::x) != 0U
                             && slot.occupied()) {
-                            game.restore_from(*slot.simulation);
-                            audio.restore_audio_state(slot.audio);
-                            // The restored machine has no relationship to the
-                            // transitions the latches were mid-way through.
-                            input.reset();
-                            for (auto& secondary : secondary_inputs) {
-                                secondary.reset();
+                            try {
+                                const auto file = decode_save_state(
+                                    read_binary_file(
+                                        save_state_path(save_menu.selection)),
+                                    cartridge_id);
+                                game.load_state(file.simulation);
+                                audio.restore_audio_state(file.audio);
+                                // The restored machine has no relationship to
+                                // the transitions the latches were mid-way
+                                // through.
+                                input.reset();
+                                for (auto& secondary : secondary_inputs) {
+                                    secondary.reset();
+                                }
+                                save_menu.status = "LOADED";
+                            } catch (const std::exception&) {
+                                save_menu.status = "LOAD FAILED";
                             }
-                            save_menu.status = "LOADED";
                         }
                         if ((remap_controls.pressed
                              & (starfox::input::b

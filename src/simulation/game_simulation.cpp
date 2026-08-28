@@ -1,4 +1,5 @@
 #include "starfox/simulation/game_simulation.hpp"
+#include "starfox/simulation/state_archive.hpp"
 
 #include "starfox/assets/decrunch.hpp"
 #include "starfox/input/buttons.hpp"
@@ -9,6 +10,20 @@
 #include <stdexcept>
 
 namespace starfox::simulation {
+
+std::vector<std::uint8_t> GameSimulation::save_state() const {
+    StateWriter writer;
+    const_cast<GameSimulation&>(*this).visit_state(writer);
+    return writer.take();
+}
+
+void GameSimulation::load_state(std::span<const std::uint8_t> state) {
+    StateReader reader{state};
+    visit_state(reader);
+    // The payload carried no pointers; everything that names an address is
+    // repaired against this instance.
+    rebind_internal_pointers();
+}
 
 std::unique_ptr<GameSimulation> GameSimulation::clone() const {
     // Not make_unique: the copy constructor is private to this class.

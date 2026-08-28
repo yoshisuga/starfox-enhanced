@@ -182,6 +182,18 @@ public:
     //
     // The result is heap-allocated because the pointers are repaired to point
     // at a specific address: moving a simulation would strand them again.
+    // Serialises the simulation. The ROM and symbol pointers, and the
+    // trigonometry tables derived from them, are deliberately absent: they are
+    // rebuilt by constructing against the same cartridge, and a save state
+    // that carried them would be describing assets rather than a game.
+    template <typename Archive>
+    void visit_state(Archive& visitor) {
+#include "starfox/simulation/generated/game_simulation_state.inl"
+    }
+
+    [[nodiscard]] std::vector<std::uint8_t> save_state() const;
+    void load_state(std::span<const std::uint8_t> state);
+
     [[nodiscard]] std::unique_ptr<GameSimulation> clone() const;
     void restore_from(const GameSimulation& snapshot);
 

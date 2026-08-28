@@ -74,6 +74,12 @@ public:
     Wdc65816(const Wdc65816&);
     Wdc65816& operator=(const Wdc65816&);
 
+    // Save state hooks. The bus, page table and IO context are excluded and
+    // rebuilt on load: they describe where this machine's memory lives, not
+    // what is in it.
+    void save_state(class StateWriter& writer);
+    void load_state(class StateReader& reader);
+
     [[nodiscard]] std::uint8_t read8(std::uint32_t address) const;
     [[nodiscard]] std::uint16_t read16(std::uint32_t address) const;
     void write8(std::uint32_t address, std::uint8_t value);

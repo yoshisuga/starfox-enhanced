@@ -1,6 +1,7 @@
 #include "starfox/simulation/wdc65816.hpp"
 
 #include "starfox/assets/decrunch.hpp"
+#include "starfox/simulation/state_archive.hpp"
 
 #include "cpu/65816/cpu_65c816.h"
 
@@ -606,6 +607,41 @@ struct Wdc65816::Impl {
         cpu->SingleStep();
         cpu->SingleStep();
         write8(kReturnSentinel, 0xeaU); // NOP; execution stops before this byte.
+    }
+
+    template <typename Archive>
+    void visit_state(Archive& visitor) {
+#include "starfox/simulation/generated/wdc65816_state.inl"
+        // The CPU's architectural registers, mirroring what the copy
+        // constructor transfers. Its self-pointers and callback context are
+        // left alone: this machine already has them pointing at itself.
+        auto& state = cpu->cpu_state;
+        visitor(state.regs);
+        visitor(state.data_segment_base);
+        visitor(state.cycle);
+        visitor(state.cycle_stop);
+        visitor(state.event_cycle);
+        visitor(state.code_segment_base);
+        visitor(state.ip_mask);
+        visitor(state.ip);
+        visitor(state.mode);
+        visitor(state.zero);
+        visitor(state.negative);
+        visitor(state.interrupts);
+        visitor(state.carry);
+        visitor(state.other_flags);
+        std::uint32_t pending = state.pending_interrupts.load(
+            std::memory_order_relaxed);
+        visitor(pending);
+        state.pending_interrupts.store(pending, std::memory_order_relaxed);
+        visitor(cpu->mode_native_6502);
+        visitor(cpu->mode_emulation);
+        visitor(cpu->mode_long_a);
+        visitor(cpu->mode_long_xy);
+        visitor(cpu->supports_decimal);
+        visitor(cpu->fast_block_moves);
+        visitor(cpu->num_emulated_instructions);
+        visitor(cpu->internal_cycle_timing);
     }
 
     // Re-points everything a copy inherited from the object it was copied
@@ -2296,6 +2332,17 @@ Wdc65816::Wdc65816(
     : impl_(std::make_unique<Impl>(rom, symbols)) {}
 
 Wdc65816::~Wdc65816() = default;
+void Wdc65816::save_state(StateWriter& writer) {
+    impl_->visit_state(writer);
+}
+
+void Wdc65816::load_state(StateReader& reader) {
+    impl_->visit_state(reader);
+    // Page entries and the bus were not part of the payload; the loaded
+    // buffers live at this machine's addresses, so the mapping is rebuilt.
+    impl_->rebind_after_copy();
+}
+
 Wdc65816::Wdc65816(const Wdc65816& other)
     : impl_{std::make_unique<Impl>(*other.impl_)} {
     impl_->rebind_after_copy();

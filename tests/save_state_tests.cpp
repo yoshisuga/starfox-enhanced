@@ -95,6 +95,31 @@ int main(int argc, char** argv) {
     require(signature(*snapshot) == snapshot_signature,
             "advancing a clone mutated the snapshot it came from");
 
-    std::cout << "save state round trip verified\n";
+    // Serialised round trip: the payload must reconstitute a simulation that
+    // is not merely similar but replays identically. A field the generated
+    // visitor missed shows up here rather than as corruption weeks later.
+    game.restore_from(*snapshot);
+    const auto payload = game.save_state();
+    require(!payload.empty(), "serialised save state was empty");
+
+    starfox::simulation::GameSimulation loaded{rom, symbols, "LEVEL1_1"};
+    loaded.load_state(payload);
+    require(signature(loaded) == snapshot_signature,
+            "a simulation loaded from bytes did not match the saved state");
+    advance(loaded, 30);
+    require(signature(loaded) == expected,
+            "replay after loading from bytes diverged from the original run");
+
+    // Loading must not depend on the destination's history: a simulation that
+    // has been played elsewhere has to end up in exactly the saved state.
+    starfox::simulation::GameSimulation reused{rom, symbols, "LEVEL1_1"};
+    advance(reused, 77);
+    reused.load_state(payload);
+    require(signature(reused) == snapshot_signature,
+            "loading over a simulation with a different history left traces "
+            "of that history");
+
+    std::cout << "save state round trip verified ("
+              << payload.size() / 1024 << " KiB payload)\n";
     return 0;
 }

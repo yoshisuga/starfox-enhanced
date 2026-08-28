@@ -3,6 +3,7 @@
 #include "starfox/assets/rom.hpp"
 #include "starfox/simulation/object_pool.hpp"
 #include "starfox/simulation/wdc65816.hpp"
+#include "starfox/simulation/state_archive.hpp"
 
 #include <array>
 #include <cstddef>
@@ -214,6 +215,23 @@ public:
     // A copied machine still points at the object pool belonging to the
     // simulation it was copied from; the new owner must redirect it.
     void rebind(ObjectPool& objects) noexcept { objects_ = &objects; }
+
+    template <typename Archive>
+    void visit_state(Archive& visitor) {
+#include "starfox/simulation/generated/map_vm_state.inl"
+        // conditions_ is deliberately absent. It maps addresses to host
+        // callbacks, which cannot be serialised and would be meaningless in a
+        // different process anyway. Nothing registers one today; if that
+        // changes, whatever installs them must reinstall them after a load.
+        //
+        // The emulated machine keeps its state behind a pimpl, so it cannot
+        // be reached by the generic visitor and routes through its own hooks.
+        if constexpr (std::is_same_v<Archive, StateWriter>) {
+            cpu_.save_state(visitor);
+        } else {
+            cpu_.load_state(visitor);
+        }
+    }
 
 private:
     void sync_display_from_cpu() noexcept;
