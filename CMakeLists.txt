@@ -2,8 +2,24 @@ cmake_minimum_required(VERSION 3.24)
 
 project(starfox_enhanced VERSION 0.1.0 LANGUAGES CXX)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(STARFOX_IOS TRUE)
+else()
+    set(STARFOX_IOS FALSE)
+endif()
+
 option(STARFOX_BUILD_TESTS "Build deterministic timing tests" ON)
+if(STARFOX_IOS)
+    # The console harnesses have no meaning inside an app sandbox.
+    set(STARFOX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+endif()
 option(STARFOX_BUILD_RUNTIME "Build the SDL3 native PC runtime" ON)
+set(STARFOX_IOS_BUNDLE_ID "com.starfoxenhanced.runtime"
+    CACHE STRING "Bundle identifier for the iOS application")
+set(STARFOX_IOS_DEVELOPMENT_TEAM ""
+    CACHE STRING "Apple Development team ID used to sign the iOS application")
+set(STARFOX_IOS_CODE_SIGN_IDENTITY "Apple Development"
+    CACHE STRING "Code signing identity for the iOS application")
 option(STARFOX_EMBED_RUNTIME_ASSETS
     "Embed source-built BPS deltas and symbol tables into the Windows runtime" ON)
 set(STARFOX_ROM_FILE
@@ -68,6 +84,11 @@ add_library(retro_cpu_65816 STATIC
 )
 target_include_directories(retro_cpu_65816 SYSTEM PUBLIC "${retro_cpu_SOURCE_DIR}")
 target_link_libraries(retro_cpu_65816 PUBLIC retro_cpu_core)
+# RetroCPU's opcode tables are static constexpr members of class templates.
+# Those are only implicitly inline from C++17 onwards, and AppleClang still
+# defaults to gnu++14, so every table would be left undefined at link time.
+target_compile_features(retro_cpu_core PUBLIC cxx_std_17)
+target_compile_features(retro_cpu_65816 PUBLIC cxx_std_17)
 if(MINGW)
     target_compile_definitions(retro_cpu_core PUBLIC __FUNCSIG__=__PRETTY_FUNCTION__)
     target_compile_definitions(retro_cpu_65816 PUBLIC __FUNCSIG__=__PRETTY_FUNCTION__)
@@ -112,32 +133,35 @@ else()
     target_compile_options(starfox_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-add_executable(starfox_timing_demo src/app/timing_demo.cpp)
-target_link_libraries(starfox_timing_demo PRIVATE starfox_core)
+# Offline diagnostic harnesses: desktop-only, they never ship in the app.
+if(NOT STARFOX_IOS)
+    add_executable(starfox_timing_demo src/app/timing_demo.cpp)
+    target_link_libraries(starfox_timing_demo PRIVATE starfox_core)
 
-add_executable(starfox_shape_preview src/app/shape_preview.cpp)
-target_link_libraries(starfox_shape_preview PRIVATE starfox_core)
+    add_executable(starfox_shape_preview src/app/shape_preview.cpp)
+    target_link_libraries(starfox_shape_preview PRIVATE starfox_core)
 
-add_executable(starfox_shape_coverage src/app/shape_coverage.cpp)
-target_link_libraries(starfox_shape_coverage PRIVATE starfox_core)
+    add_executable(starfox_shape_coverage src/app/shape_coverage.cpp)
+    target_link_libraries(starfox_shape_coverage PRIVATE starfox_core)
 
-add_executable(starfox_map_trace src/app/map_trace.cpp)
-target_link_libraries(starfox_map_trace PRIVATE starfox_core)
+    add_executable(starfox_map_trace src/app/map_trace.cpp)
+    target_link_libraries(starfox_map_trace PRIVATE starfox_core)
 
-add_executable(starfox_strategy_trace src/app/strategy_trace.cpp)
-target_link_libraries(starfox_strategy_trace PRIVATE starfox_core)
+    add_executable(starfox_strategy_trace src/app/strategy_trace.cpp)
+    target_link_libraries(starfox_strategy_trace PRIVATE starfox_core)
 
-add_executable(starfox_game_init_trace src/app/game_init_trace.cpp)
-target_link_libraries(starfox_game_init_trace PRIVATE starfox_core)
+    add_executable(starfox_game_init_trace src/app/game_init_trace.cpp)
+    target_link_libraries(starfox_game_init_trace PRIVATE starfox_core)
 
-add_executable(starfox_stage_trace src/app/stage_trace.cpp)
-target_link_libraries(starfox_stage_trace PRIVATE starfox_core)
+    add_executable(starfox_stage_trace src/app/stage_trace.cpp)
+    target_link_libraries(starfox_stage_trace PRIVATE starfox_core)
 
-add_executable(starfox_stage_preview src/app/stage_preview.cpp)
-target_link_libraries(starfox_stage_preview PRIVATE starfox_core)
+    add_executable(starfox_stage_preview src/app/stage_preview.cpp)
+    target_link_libraries(starfox_stage_preview PRIVATE starfox_core)
 
-add_executable(starfox_planet_probe src/app/planet_probe.cpp)
-target_link_libraries(starfox_planet_probe PRIVATE starfox_core)
+    add_executable(starfox_planet_probe src/app/planet_probe.cpp)
+    target_link_libraries(starfox_planet_probe PRIVATE starfox_core)
+endif()
 
 if(STARFOX_BUILD_RUNTIME)
     set(SDL_SHARED OFF CACHE BOOL "Avoid a runtime SDL DLL" FORCE)
@@ -151,15 +175,69 @@ if(STARFOX_BUILD_RUNTIME)
     )
     FetchContent_MakeAvailable(SDL3)
 
-    add_executable(starfox_pc
+    set(STARFOX_RUNTIME_SOURCES
         src/app/starfox_pc.cpp
         src/app/runtime_input.cpp)
+    if(STARFOX_IOS)
+        list(APPEND STARFOX_RUNTIME_SOURCES src/app/touch_controls.cpp)
+        add_executable(starfox_pc MACOSX_BUNDLE ${STARFOX_RUNTIME_SOURCES})
+    else()
+        add_executable(starfox_pc ${STARFOX_RUNTIME_SOURCES})
+    endif()
     if(WIN32)
         # The packaged runtime reports failures through a native message box;
         # it should not open a second console window beside the game.
         set_target_properties(starfox_pc PROPERTIES WIN32_EXECUTABLE TRUE)
     endif()
     target_link_libraries(starfox_pc PRIVATE starfox_core SDL3::SDL3)
+
+    if(STARFOX_IOS)
+        # An app bundle has no writable directory beside its executable and no
+        # command line, so the runtime reads its patches and symbol tables from
+        # the bundle's Resources folder instead of a Windows resource section.
+        set(STARFOX_IOS_RESOURCES "")
+        macro(starfox_add_ios_resource source_path bundle_name)
+            if(EXISTS "${source_path}")
+                set(staged
+                    "${CMAKE_CURRENT_BINARY_DIR}/ios-resources/${bundle_name}")
+                configure_file("${source_path}" "${staged}" COPYONLY)
+                list(APPEND STARFOX_IOS_RESOURCES "${staged}")
+            endif()
+        endmacro()
+        starfox_add_ios_resource(
+            "${STARFOX_ORIGINAL_PATCH_FILE}" "ultrastarfox.bps")
+        starfox_add_ios_resource(
+            "${STARFOX_SYMBOLS_FILE}" "ultrastarfox-symbols.txt")
+        starfox_add_ios_resource(
+            "${STARFOX_EX_PATCH_FILE}" "starfox-ex.bps")
+        starfox_add_ios_resource(
+            "${STARFOX_EX_SYMBOLS_FILE}" "starfox-ex-symbols.txt")
+
+        list(LENGTH STARFOX_IOS_RESOURCES STARFOX_IOS_RESOURCE_COUNT)
+        if(STARFOX_IOS_RESOURCE_COUNT LESS 2)
+            message(FATAL_ERROR
+                "The iOS runtime needs at least the Original BPS delta and "
+                "symbol table. Run tools/build_upstream.sh, or point "
+                "STARFOX_SYMBOLS_FILE at an existing SYMBOLS.TXT.")
+        endif()
+        target_sources(starfox_pc PRIVATE ${STARFOX_IOS_RESOURCES})
+        set_source_files_properties(${STARFOX_IOS_RESOURCES} PROPERTIES
+            MACOSX_PACKAGE_LOCATION Resources)
+        target_compile_definitions(starfox_pc PRIVATE
+            STARFOX_HAS_EMBEDDED_ASSETS=1
+            STARFOX_BUNDLED_ASSETS=1)
+        set_target_properties(starfox_pc PROPERTIES
+            OUTPUT_NAME "StarFoxEnhanced"
+            MACOSX_BUNDLE_INFO_PLIST
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/app/ios/Info.plist.in"
+            MACOSX_BUNDLE_BUNDLE_NAME "Star Fox Enhanced"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "${STARFOX_IOS_BUNDLE_ID}"
+            MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+            XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+            XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "${STARFOX_IOS_CODE_SIGN_IDENTITY}"
+            XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${STARFOX_IOS_DEVELOPMENT_TEAM}")
+    endif()
     if(WIN32 AND STARFOX_EMBED_RUNTIME_ASSETS)
         if(EXISTS "${STARFOX_ORIGINAL_PATCH_FILE}"
            AND EXISTS "${STARFOX_SYMBOLS_FILE}"
@@ -197,8 +275,10 @@ if(STARFOX_BUILD_RUNTIME)
         target_link_options(starfox_pc PRIVATE -static -static-libgcc -static-libstdc++)
     endif()
 
-    install(TARGETS starfox_pc RUNTIME DESTINATION .)
-    install(FILES README.md THIRD_PARTY_NOTICES.md DESTINATION .)
+    if(NOT STARFOX_IOS)
+        install(TARGETS starfox_pc RUNTIME DESTINATION .)
+        install(FILES README.md THIRD_PARTY_NOTICES.md DESTINATION .)
+    endif()
 
 endif()
 

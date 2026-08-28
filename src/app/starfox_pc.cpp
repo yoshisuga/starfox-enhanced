@@ -1,5 +1,8 @@
 #include "starfox/audio/spc700_audio.hpp"
 #include "starfox/app/runtime_input.hpp"
+#if defined(STARFOX_BUNDLED_ASSETS)
+#include "starfox/app/touch_controls.hpp"
+#endif
 #include "starfox/assets/bps.hpp"
 #include "starfox/assets/rom.hpp"
 #include "starfox/assets/runtime_bundle.hpp"
@@ -26,10 +29,12 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -333,7 +338,43 @@ std::vector<ScriptedPress> parse_scripted_presses(const char* text) {
     return result;
 }
 
-#if defined(_WIN32) && defined(STARFOX_HAS_EMBEDDED_ASSETS)
+#if defined(STARFOX_HAS_EMBEDDED_ASSETS)
+#if defined(STARFOX_BUNDLED_ASSETS)
+// An app bundle has no resource section, so the same asset identifiers map to
+// files staged into Resources at build time. Star Fox EX is optional: its
+// upstream sources may be unavailable, and an absent pair simply yields an
+// empty span that the caller treats as "EX not installed".
+std::span<const std::uint8_t> embedded_resource(int identifier) {
+    static std::unordered_map<int, std::vector<std::uint8_t>> cache;
+    if (const auto found = cache.find(identifier); found != cache.end()) {
+        return found->second;
+    }
+    const auto* name = [identifier]() -> const char* {
+        switch (identifier) {
+        case 101: return "ultrastarfox.bps";
+        case 102: return "ultrastarfox-symbols.txt";
+        case 108: return "starfox-ex.bps";
+        case 109: return "starfox-ex-symbols.txt";
+        default: return nullptr;
+        }
+    }();
+    if (name == nullptr) {
+        throw std::runtime_error{"unknown Star Fox asset resource"};
+    }
+    const auto* base = SDL_GetBasePath();
+    const auto path = std::filesystem::path{base == nullptr ? "" : base} / name;
+    std::vector<std::uint8_t> bytes;
+    if (std::filesystem::is_regular_file(path)) {
+        std::ifstream stream{path, std::ios::binary};
+        bytes.assign(std::istreambuf_iterator<char>{stream},
+            std::istreambuf_iterator<char>{});
+    } else if (identifier == 101 || identifier == 102) {
+        throw std::runtime_error{
+            std::string{"bundled Star Fox asset is missing: "} + name};
+    }
+    return cache.emplace(identifier, std::move(bytes)).first->second;
+}
+#else
 std::span<const std::uint8_t> embedded_resource(int identifier) {
     const auto module = GetModuleHandleW(nullptr);
     const auto resource = FindResourceW(
@@ -353,6 +394,7 @@ std::span<const std::uint8_t> embedded_resource(int identifier) {
     return std::span<const std::uint8_t>{
         data, static_cast<std::size_t>(size)};
 }
+#endif
 
 RuntimeAssets make_runtime_assets(
     std::vector<std::uint8_t> rom,
@@ -364,8 +406,27 @@ RuntimeAssets make_runtime_assets(
 
 struct RuntimeAssetSet {
     RuntimeAssets original;
-    RuntimeAssets starfox_ex;
+    std::optional<RuntimeAssets> starfox_ex;
 };
+
+#if defined(STARFOX_BUNDLED_ASSETS)
+// The app's own Documents folder: writable, and exposed to Files and iTunes
+// sharing so the player can drop their retail ROM in without a picker.
+std::filesystem::path sandbox_documents_directory() {
+    if (const auto* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
+        documents != nullptr && *documents != '\0') {
+        return std::filesystem::path{documents};
+    }
+    if (char* preference_path =
+            SDL_GetPrefPath("StarFoxEnhanced", "StarFoxEnhanced");
+        preference_path != nullptr) {
+        const std::filesystem::path result{preference_path};
+        SDL_free(preference_path);
+        return result;
+    }
+    return std::filesystem::current_path();
+}
+#endif
 
 std::vector<std::uint8_t> read_binary_file(
     const std::filesystem::path& path) {
@@ -413,20 +474,44 @@ load_required_retail_v12(const std::filesystem::path& executable_directory) {
         const auto path = std::filesystem::path{override_path};
         return {path, load_retail_v12(path)};
     }
+#if !defined(STARFOX_BUNDLED_ASSETS)
     candidates.emplace_back(
         R"(C:\NTSC-US Super Nintendo System Roms\Star Fox (USA) (Rev 2).sfc)");
+#endif
     candidates.emplace_back(
         executable_directory / "Star Fox (USA) (Rev 2).sfc");
     candidates.emplace_back(executable_directory / "Star Fox v1.2.sfc");
+#if defined(STARFOX_BUNDLED_ASSETS)
+    // Files copies keep their original name far more often than not, so accept
+    // any .sfc/.smc the player dropped in rather than demanding an exact one.
+    std::error_code listing_error;
+    for (const auto& entry : std::filesystem::directory_iterator{
+             executable_directory, listing_error}) {
+        if (!entry.is_regular_file()) continue;
+        auto extension = entry.path().extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (extension == ".sfc" || extension == ".smc") {
+            candidates.emplace_back(entry.path());
+        }
+    }
+#endif
     for (const auto& path : candidates) {
         if (!std::filesystem::is_regular_file(path)) continue;
         return {path, load_retail_v12(path)};
     }
+#if defined(STARFOX_BUNDLED_ASSETS)
+    throw std::runtime_error{
+        "Star Fox Enhanced requires an unmodified Star Fox USA v1.2 "
+        "(Rev 2) ROM. Copy it into the Star Fox Enhanced folder in the "
+        "Files app (On My iPhone / On My iPad), then relaunch."};
+#else
     throw std::runtime_error{
         "Star Fox Enhanced requires an unmodified Star Fox USA v1.2 "
         "(Rev 2) ROM. Place 'Star Fox (USA) (Rev 2).sfc' beside the game, "
         "in C:\\NTSC-US Super Nintendo System Roms, or set "
         "STARFOX_RETAIL_ROM to its full path."};
+#endif
 }
 
 std::uint32_t embedded_asset_manifest() {
@@ -450,11 +535,17 @@ std::string embedded_text_resource(int identifier) {
 
 RuntimeAssetSet unpack_runtime_assets(
     starfox::assets::RuntimeBundlePayload payload) {
+    // Star Fox EX is optional. An empty ROM means the build had no EX patch
+    // to compile from, and the runtime simply offers the Original experience.
+    auto starfox_ex = std::optional<RuntimeAssets>{};
+    if (!payload.starfox_ex_rom.empty()) {
+        starfox_ex = make_runtime_assets(std::move(payload.starfox_ex_rom),
+            std::move(payload.starfox_ex_symbols));
+    }
     return {
         make_runtime_assets(std::move(payload.original_rom),
             std::move(payload.original_symbols)),
-        make_runtime_assets(std::move(payload.starfox_ex_rom),
-            std::move(payload.starfox_ex_symbols)),
+        std::move(starfox_ex),
     };
 }
 
@@ -477,6 +568,7 @@ void write_asset_companion(
                 "unable to write asset companion: " + path.string()};
         }
     }
+#if defined(_WIN32)
     if (!MoveFileExW(temporary.c_str(), path.c_str(),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         const auto error = GetLastError();
@@ -485,10 +577,36 @@ void write_asset_companion(
             "unable to install asset companion (Windows error "
             + std::to_string(error) + "): " + path.string()};
     }
+#else
+    std::error_code error;
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        std::filesystem::remove(temporary, error);
+        throw std::runtime_error{
+            "unable to install asset companion (" + error.message()
+            + "): " + path.string()};
+    }
+#endif
 }
+
+RuntimeAssets load_external_assets(
+    const std::filesystem::path& rom_path,
+    const std::filesystem::path& symbols_path);
 
 RuntimeAssetSet load_or_compile_runtime_assets(
     const std::filesystem::path& executable_directory) {
+#if defined(STARFOX_BUNDLED_ASSETS)
+    // The desktop runtime accepts an already-assembled ROM and symbol table on
+    // its command line. A bundle has no command line, so the same pair is
+    // picked up from the documents folder when it is present.
+    const auto assembled_rom = executable_directory / "SF.SFC";
+    const auto assembled_symbols = executable_directory / "SYMBOLS.TXT";
+    if (std::filesystem::is_regular_file(assembled_rom)
+        && std::filesystem::is_regular_file(assembled_symbols)) {
+        return {load_external_assets(assembled_rom, assembled_symbols),
+            std::nullopt};
+    }
+#endif
     const auto companion_path =
         executable_directory / "Starfox-Assets.BIN";
     const auto manifest = embedded_asset_manifest();
@@ -512,9 +630,11 @@ RuntimeAssetSet load_or_compile_runtime_assets(
     payload.original_rom = starfox::assets::apply_bps_patch(
         retail_rom, embedded_resource(101));
     payload.original_symbols = embedded_text_resource(102);
-    payload.starfox_ex_rom = starfox::assets::apply_bps_patch(
-        retail_rom, embedded_resource(108));
-    payload.starfox_ex_symbols = embedded_text_resource(109);
+    if (const auto ex_patch = embedded_resource(108); !ex_patch.empty()) {
+        payload.starfox_ex_rom =
+            starfox::assets::apply_bps_patch(retail_rom, ex_patch);
+        payload.starfox_ex_symbols = embedded_text_resource(109);
+    }
     const auto companion =
         starfox::assets::encode_runtime_bundle(payload, manifest);
     write_asset_companion(companion_path, companion);
@@ -548,14 +668,23 @@ public:
 class Window {
 public:
     Window() {
+#if defined(STARFOX_BUNDLED_ASSETS)
+        // iOS ignores the requested size and hands back the whole screen; ask
+        // for fullscreen up front so the reported size is the real one.
+        constexpr auto window_flags = SDL_WINDOW_FULLSCREEN
+            | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+#else
+        constexpr auto window_flags = SDL_WINDOW_RESIZABLE;
+#endif
         if (!SDL_CreateWindowAndRenderer(
                 "Star Fox Enhanced - native PC runtime", 1024, 896,
-                SDL_WINDOW_RESIZABLE, &window_, &renderer_)) {
+                window_flags, &window_, &renderer_)) {
             throw std::runtime_error{
                 std::string{"SDL_CreateWindowAndRenderer: "} + SDL_GetError()};
         }
         SDL_ShowWindow(window_);
         static_cast<void>(SDL_SyncWindow(window_));
+
         // Presentation has its own exact 60 Hz schedule below. Following the
         // display's vsync would run at 75/120/144 Hz on common PC monitors.
         SDL_SetRenderVSync(renderer_, 0);
@@ -839,6 +968,18 @@ public:
         }
     }
 
+    void set_overlay(std::function<void(SDL_Renderer*)> overlay) noexcept {
+        overlay_ = std::move(overlay);
+    }
+
+    // Size of the drawable in pixels, which is what the overlay lays out in.
+    void output_size(int& width, int& height) const noexcept {
+        width = 0;
+        height = 0;
+        static_cast<void>(
+            SDL_GetCurrentRenderOutputSize(renderer_, &width, &height));
+    }
+
     void set_relative_mouse_mode(bool enabled) noexcept {
         if (relative_mouse_mode_ == enabled) return;
         if (SDL_SetWindowRelativeMouseMode(window_, enabled)) {
@@ -877,6 +1018,18 @@ private:
         SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 255);
         SDL_RenderClear(renderer_);
         SDL_RenderTexture(renderer_, texture_, nullptr, nullptr);
+        if (overlay_ != nullptr) {
+            // The overlay draws in window pixels so it can use the letterbox
+            // bars, which means stepping outside the logical presentation the
+            // game texture was just scaled through.
+            SDL_SetRenderLogicalPresentation(renderer_, 0, 0,
+                SDL_LOGICAL_PRESENTATION_DISABLED);
+            overlay_(renderer_);
+            SDL_SetRenderLogicalPresentation(renderer_,
+                static_cast<int>(texture_width_),
+                static_cast<int>(texture_height_),
+                SDL_LOGICAL_PRESENTATION_LETTERBOX);
+        }
         SDL_RenderPresent(renderer_);
     }
     void ensure_dimensions(std::uint32_t width, std::uint32_t height) {
@@ -897,11 +1050,13 @@ private:
                 std::string{"SDL_SetRenderLogicalPresentation: "}
                 + SDL_GetError()};
         }
+#if !defined(STARFOX_BUNDLED_ASSETS)
         const auto integer_scale = width <= snes_width
             ? 4U : (width <= widescreen_16_9_width ? 3U : 2U);
         SDL_SetWindowSize(window_,
             static_cast<int>(width * integer_scale),
             static_cast<int>(height * integer_scale));
+#endif
         texture_width_ = width;
         texture_height_ = height;
     }
@@ -912,6 +1067,7 @@ private:
     std::uint32_t texture_width_{snes_width};
     std::uint32_t texture_height_{snes_height};
     bool relative_mouse_mode_{};
+    std::function<void(SDL_Renderer*)> overlay_{};
     std::vector<std::uint8_t> rgba_;
 };
 
@@ -1299,7 +1455,20 @@ CameraPoint world_to_camera(
 
 } // namespace
 
-int main(int argc, char** argv) {
+#if defined(STARFOX_BUNDLED_ASSETS)
+// iOS has no plain C entry point: SDL_main.h supplies one that hands control
+// to SDL's UIApplicationMain shim, which owns the UIKit run loop, and calls
+// SDL_main() from inside it. Its `main` macro is dropped immediately so it
+// cannot rewrite unrelated identifiers such as PregamePage::main; the entry
+// point below is named SDL_main directly instead.
+#include <SDL3/SDL_main.h>
+#undef main
+#define STARFOX_ENTRY_POINT SDL_main
+#else
+#define STARFOX_ENTRY_POINT main
+#endif
+
+int STARFOX_ENTRY_POINT(int argc, char** argv) {
 #if defined(_WIN32)
     // Keep the lock alive through the catch block and its modal error dialog.
     // If it lived inside try, stack unwinding released it before MessageBoxA;
@@ -1321,16 +1490,22 @@ int main(int argc, char** argv) {
         const SdlContext sdl;
         Window window;
         std::string initial_map = "BOOT";
-#if defined(_WIN32) && defined(STARFOX_HAS_EMBEDDED_ASSETS)
+#if defined(STARFOX_HAS_EMBEDDED_ASSETS)
+#if defined(STARFOX_BUNDLED_ASSETS)
+        // A bundle is read-only, so the compiled companion is written beside
+        // the player's ROM in Documents rather than next to the executable.
+        const auto executable_directory = sandbox_documents_directory();
+#else
         const auto executable_directory =
             std::filesystem::absolute(argv[0]).parent_path();
+#endif
         auto embedded_runtime_assets =
             load_or_compile_runtime_assets(executable_directory);
 #endif
         const auto original_assets = [&]() -> RuntimeAssets {
             if (argc == 1 || argc == 2) {
                 if (argc == 2) initial_map = argv[1];
-#if defined(_WIN32) && defined(STARFOX_HAS_EMBEDDED_ASSETS)
+#if defined(STARFOX_HAS_EMBEDDED_ASSETS)
                 return std::move(embedded_runtime_assets.original);
 #else
                 std::filesystem::path rom_path;
@@ -1368,14 +1543,15 @@ int main(int argc, char** argv) {
                 if (argc == 4) initial_map = argv[3];
                 return load_external_assets(argv[1], argv[2]);
             }
+#if !defined(STARFOX_BUNDLED_ASSETS)
             std::cerr << "usage: starfox_pc [MAP]\n"
                          "   or: starfox_pc ROM SYMBOLS [MAP]\n";
+#endif
             throw std::runtime_error{"invalid command-line arguments"};
         }();
         std::optional<RuntimeAssets> starfox_ex_assets;
-#if defined(_WIN32) && defined(STARFOX_HAS_EMBEDDED_ASSETS)
-        starfox_ex_assets.emplace(
-            std::move(embedded_runtime_assets.starfox_ex));
+#if defined(STARFOX_HAS_EMBEDDED_ASSETS)
+        starfox_ex_assets = std::move(embedded_runtime_assets.starfox_ex);
 #else
         const auto executable_directory =
             std::filesystem::absolute(argv[0]).parent_path();
@@ -1681,6 +1857,52 @@ int main(int argc, char** argv) {
         };
         starfox::app::InputBindings bindings;
         bindings.load();
+#if defined(STARFOX_BUNDLED_ASSETS)
+        starfox::app::TouchControls touch_controls;
+        {
+            int output_width = 0;
+            int output_height = 0;
+            window.output_size(output_width, output_height);
+            touch_controls.set_viewport(output_width, output_height);
+        }
+        window.set_overlay([&touch_controls, &window](SDL_Renderer* renderer) {
+            // UIKit settles the interface orientation after the window is
+            // created, so the drawable size is re-read every frame rather than
+            // trusted from startup or from resize-event ordering.
+            int output_width = 0;
+            int output_height = 0;
+            window.output_size(output_width, output_height);
+            touch_controls.set_viewport(output_width, output_height);
+            touch_controls.render(renderer);
+        });
+#endif
+        // A paired controller makes the overlay redundant, so it hides and
+        // gives the screen back rather than sitting on top of the game.
+        const auto update_touch_visibility = [&](bool has_gamepad) {
+#if defined(STARFOX_BUNDLED_ASSETS)
+            if (touch_controls.visible() == !has_gamepad) return;
+            touch_controls.set_visible(!has_gamepad);
+            touch_controls.release_all();
+#else
+            static_cast<void>(has_gamepad);
+#endif
+        };
+        // Touch input is additive: a paired controller keeps working, and the
+        // overlay simply contributes the same SNES button mask.
+        const auto sample_player_buttons = [&](SDL_Gamepad* pad) {
+            auto mask = bindings.sample(pad);
+#if defined(STARFOX_BUNDLED_ASSETS)
+            mask = static_cast<ButtonMask>(mask | touch_controls.held());
+#endif
+            return mask;
+        };
+        const auto menu_navigation = [&](SDL_Gamepad* pad) {
+            auto mask = bindings.sample_fixed_menu_navigation(pad);
+#if defined(STARFOX_BUNDLED_ASSETS)
+            mask = static_cast<ButtonMask>(mask | touch_controls.held());
+#endif
+            return mask;
+        };
         const auto hud_layout_path = starfox::app::hud_layout_settings_path();
         starfox::render::HudLayoutProfiles hud_layouts{};
         static_cast<void>(starfox::app::load_hud_layout(
@@ -1893,6 +2115,15 @@ int main(int argc, char** argv) {
                         step_frame_backward = true;
                     }
                 }
+#if defined(STARFOX_BUNDLED_ASSETS)
+                if (touch_controls.handle_event(event)) continue;
+                if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+                    int output_width = 0;
+                    int output_height = 0;
+                    window.output_size(output_width, output_height);
+                    touch_controls.set_viewport(output_width, output_height);
+                }
+#endif
                 if (event.type == SDL_EVENT_QUIT) {
                     running = false;
                 } else if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
@@ -1900,6 +2131,11 @@ int main(int argc, char** argv) {
                 } else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
                     window_focused = false;
                     ex_mouse_input.release();
+#if defined(STARFOX_BUNDLED_ASSETS)
+                    // A backgrounded app never receives the matching finger-up
+                    // events, so a held button would stick on resume.
+                    touch_controls.release_all();
+#endif
                 } else if (event.type == SDL_EVENT_GAMEPAD_ADDED
                            || event.type == SDL_EVENT_GAMEPAD_REMOVED) {
                     refresh_gamepads();
@@ -2082,7 +2318,7 @@ int main(int argc, char** argv) {
                         remap_menu.active = false;
                     }
                     remap_input.reset(
-                        bindings.sample_fixed_menu_navigation(gamepad));
+                        menu_navigation(gamepad));
                 } else if (remap_menu.waiting_for_input
                            && remap_menu.device
                                == starfox::app::BindingDevice::keyboard) {
@@ -2091,7 +2327,7 @@ int main(int argc, char** argv) {
                     bindings.save();
                     remap_menu.waiting_for_input = false;
                     remap_input.reset(
-                        bindings.sample_fixed_menu_navigation(gamepad));
+                        menu_navigation(gamepad));
                 }
                 if (remap_menu.active && remap_menu.waiting_for_input
                     && remap_menu.device
@@ -2104,7 +2340,7 @@ int main(int argc, char** argv) {
                     bindings.save();
                     remap_menu.waiting_for_input = false;
                     remap_input.reset(
-                        bindings.sample_fixed_menu_navigation(gamepad));
+                        menu_navigation(gamepad));
                 }
                 if (remap_menu.active && remap_menu.waiting_for_input
                     && remap_menu.device
@@ -2120,7 +2356,7 @@ int main(int argc, char** argv) {
                     bindings.save();
                     remap_menu.waiting_for_input = false;
                     remap_input.reset(
-                        bindings.sample_fixed_menu_navigation(gamepad));
+                        menu_navigation(gamepad));
                 }
             }
 
@@ -2136,7 +2372,7 @@ int main(int argc, char** argv) {
                     secondary_inputs[player].reset(held);
                 }
                 remap_input.reset(
-                    bindings.sample_fixed_menu_navigation(gamepad));
+                    menu_navigation(gamepad));
                 presentation_history.to_live();
                 if (frame_frozen) {
                     frame_step_clock.synchronize(last_phase_fraction);
@@ -2207,7 +2443,8 @@ int main(int argc, char** argv) {
             if (!test_unpaced && !advance_frozen_frame) {
                 pacer.wait_for_next_frame(game.presentation_fps());
             }
-            auto sampled_buttons = bindings.sample(gamepad);
+            update_touch_visibility(gamepad != nullptr);
+            auto sampled_buttons = sample_player_buttons(gamepad);
             for (const auto& press : scripted_presses) {
                 if (presented_frames >= press.presentation_frame
                     && presented_frames < press.presentation_frame + 3U) {
@@ -2224,7 +2461,7 @@ int main(int argc, char** argv) {
                         : starfox::input::ButtonMask{});
             }
             remap_input.sample(
-                bindings.sample_fixed_menu_navigation(gamepad));
+                menu_navigation(gamepad));
             const auto* keyboard_state = SDL_GetKeyboardState(nullptr);
             const auto fast_forward = !advance_frozen_frame
                 && (test_fast_forward || (keyboard_state[SDL_SCANCODE_TAB]
@@ -2334,7 +2571,7 @@ int main(int argc, char** argv) {
                         remap_menu.active = true;
                         remap_menu.waiting_for_input = false;
                         remap_input.reset(
-                            bindings.sample_fixed_menu_navigation(gamepad));
+                            menu_navigation(gamepad));
                         controls = {};
                         secondary_controls = {};
                     } else if (game.flow_state()
@@ -3759,6 +3996,12 @@ int main(int argc, char** argv) {
             MessageBoxA(nullptr, message.c_str(), "Star Fox Enhanced",
                 MB_OK | MB_ICONERROR | MB_TASKMODAL);
         }
+#elif defined(STARFOX_BUNDLED_ASSETS)
+        // There is no console to read on a phone. A missing ROM is the common
+        // first-launch case, and the player has to be told what to do about it.
+        static_cast<void>(SDL_ShowSimpleMessageBox(
+            SDL_MESSAGEBOX_ERROR, "Star Fox Enhanced", message.c_str(),
+            nullptr));
 #endif
         return 1;
     }

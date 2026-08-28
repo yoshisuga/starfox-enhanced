@@ -119,6 +119,17 @@ std::filesystem::path documents_settings_path(std::string_view filename) {
             / "Documents" / "Star Fox Enhanced" / filename;
     }
 #endif
+    // iOS has no user-wide Documents folder to reach: SDL_GetUserFolder
+    // returns nothing inside the sandbox, so settings live in the app's own
+    // preferences container instead of being silently discarded.
+    if (char* preference_path =
+            SDL_GetPrefPath("StarFoxEnhanced", "StarFoxEnhanced");
+        preference_path != nullptr) {
+        const std::filesystem::path result =
+            std::filesystem::path{preference_path} / filename;
+        SDL_free(preference_path);
+        return result;
+    }
     return {};
 }
 
