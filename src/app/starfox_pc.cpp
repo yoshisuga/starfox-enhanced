@@ -1331,15 +1331,38 @@ std::filesystem::path save_state_directory() {
             if (candidate.empty()) return false;
             std::error_code error;
             std::filesystem::create_directories(candidate, error);
-            if (error) return false;
-            const auto token = candidate / ".starfox-write-probe";
-            std::ofstream stream{token};
-            if (!stream) return false;
+            if (error) {
+                SDL_Log("STARFOX probe: mkdir %s failed: %s",
+                    candidate.string().c_str(), error.message().c_str());
+                return false;
+            }
+            const auto token = candidate / "write-probe.tmp";
+            errno = 0;
+            std::ofstream stream{token, std::ios::binary | std::ios::trunc};
+            if (!stream) {
+                SDL_Log("STARFOX probe: create %s failed: %s (errno %d)",
+                    token.string().c_str(),
+                    errno != 0 ? std::strerror(errno) : "unknown", errno);
+                return false;
+            }
             stream.close();
             std::filesystem::remove(token, error);
             return true;
         };
 
+#if defined(STARFOX_BUNDLED_ASSETS)
+        // The app's own documents root, which is what file sharing exposes.
+        // A subfolder is somewhere to lose files; the root is what the Files
+        // app shows. On the desktop this would be the user's own Documents
+        // folder, which is not a place to scatter save files, so it is
+        // deliberately mobile-only.
+        if (const auto documents = sandbox_documents_directory();
+            !documents.empty() && probe(documents)) {
+            SDL_Log("STARFOX save states: using documents root %s",
+                documents.string().c_str());
+            return documents;
+        }
+#endif
         const auto settings = starfox::app::pregame_settings_path();
         if (!settings.empty() && probe(settings.parent_path())) {
             return settings.parent_path();
@@ -2877,8 +2900,11 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
                                 | starfox::input::start)) != 0U) {
                             save_menu.active = false;
                         }
-                        controls = {};
-                        secondary_controls = {};
+                        // Hold the simulation still while the menu is open.
+                        // The raster batch is recomputed from elapsed wall
+                        // clock every frame, so skipping the tick cannot bank
+                        // a backlog that would burst through on resume.
+                        continue;
                     } else if (hud_editor.active) {
                         if ((remap_controls.pressed
                              & starfox::input::y) != 0U) {
