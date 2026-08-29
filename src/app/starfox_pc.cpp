@@ -2889,7 +2889,11 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
                                 for (auto& secondary : secondary_inputs) {
                                     secondary.reset();
                                 }
-                                save_menu.status = "LOADED";
+                                // Loading is the end of the interaction:
+                                // stay open and the player is left staring at
+                                // a paused game they asked to resume.
+                                save_menu.active = false;
+                                save_menu.status.clear();
                             } catch (const std::exception& error) {
                                 SDL_Log("STARFOX load failed: %s", error.what());
                                 save_menu.status = "LOAD FAILED";
