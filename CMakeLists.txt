@@ -14,6 +14,12 @@ if(STARFOX_IOS)
     set(STARFOX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 endif()
 option(STARFOX_BUILD_RUNTIME "Build the SDL3 native PC runtime" ON)
+if(APPLE AND NOT STARFOX_IOS)
+    option(STARFOX_MACOS_BUNDLE
+        "Build the macOS runtime as a double-clickable .app bundle" ON)
+else()
+    set(STARFOX_MACOS_BUNDLE OFF)
+endif()
 set(STARFOX_IOS_BUNDLE_ID "com.starfoxenhanced.runtime"
     CACHE STRING "Bundle identifier for the iOS application")
 set(STARFOX_IOS_DEVELOPMENT_TEAM ""
@@ -22,6 +28,9 @@ set(STARFOX_IOS_CODE_SIGN_IDENTITY "Apple Development"
     CACHE STRING "Code signing identity for the iOS application")
 set(STARFOX_IOS_CODE_SIGN_STYLE "Automatic"
     CACHE STRING "Xcode signing style for the iOS application")
+set(STARFOX_MACOS_CODE_SIGN_IDENTITY ""
+    CACHE STRING
+    "Signing identity for the macOS bundle; empty means ad-hoc (local use)")
 option(STARFOX_EMBED_RUNTIME_ASSETS
     "Embed source-built BPS deltas and symbol tables into the Windows runtime" ON)
 set(STARFOX_ROM_FILE
@@ -182,6 +191,8 @@ if(STARFOX_BUILD_RUNTIME)
         src/app/runtime_input.cpp)
     if(STARFOX_IOS)
         list(APPEND STARFOX_RUNTIME_SOURCES src/app/touch_controls.cpp)
+    endif()
+    if(STARFOX_IOS OR STARFOX_MACOS_BUNDLE)
         add_executable(starfox_pc MACOSX_BUNDLE ${STARFOX_RUNTIME_SOURCES})
     else()
         add_executable(starfox_pc ${STARFOX_RUNTIME_SOURCES})
@@ -193,38 +204,85 @@ if(STARFOX_BUILD_RUNTIME)
     endif()
     target_link_libraries(starfox_pc PRIVATE starfox_core SDL3::SDL3)
 
-    if(STARFOX_IOS)
+    if(STARFOX_IOS OR STARFOX_MACOS_BUNDLE)
         # An app bundle has no writable directory beside its executable and no
         # command line, so the runtime reads its patches and symbol tables from
         # the bundle's Resources folder instead of a Windows resource section.
-        set(STARFOX_IOS_RESOURCES "")
-        macro(starfox_add_ios_resource source_path bundle_name)
+        set(STARFOX_BUNDLE_RESOURCES "")
+        macro(starfox_add_bundle_resource source_path bundle_name)
             if(EXISTS "${source_path}")
                 set(staged
-                    "${CMAKE_CURRENT_BINARY_DIR}/ios-resources/${bundle_name}")
+                    "${CMAKE_CURRENT_BINARY_DIR}/bundle-resources/${bundle_name}")
                 configure_file("${source_path}" "${staged}" COPYONLY)
-                list(APPEND STARFOX_IOS_RESOURCES "${staged}")
+                list(APPEND STARFOX_BUNDLE_RESOURCES "${staged}")
             endif()
         endmacro()
-        starfox_add_ios_resource(
+        starfox_add_bundle_resource(
             "${STARFOX_ORIGINAL_PATCH_FILE}" "ultrastarfox.bps")
-        starfox_add_ios_resource(
+        starfox_add_bundle_resource(
             "${STARFOX_SYMBOLS_FILE}" "ultrastarfox-symbols.txt")
-        starfox_add_ios_resource(
+        starfox_add_bundle_resource(
             "${STARFOX_EX_PATCH_FILE}" "starfox-ex.bps")
-        starfox_add_ios_resource(
+        starfox_add_bundle_resource(
             "${STARFOX_EX_SYMBOLS_FILE}" "starfox-ex-symbols.txt")
 
-        list(LENGTH STARFOX_IOS_RESOURCES STARFOX_IOS_RESOURCE_COUNT)
-        if(STARFOX_IOS_RESOURCE_COUNT LESS 2)
+        list(LENGTH STARFOX_BUNDLE_RESOURCES STARFOX_BUNDLE_RESOURCE_COUNT)
+        if(STARFOX_BUNDLE_RESOURCE_COUNT LESS 2)
             message(FATAL_ERROR
-                "The iOS runtime needs at least the Original BPS delta and "
+                "An app bundle needs at least the Original BPS delta and "
                 "symbol table. Run tools/build_upstream.sh, or point "
                 "STARFOX_SYMBOLS_FILE at an existing SYMBOLS.TXT.")
         endif()
-        target_sources(starfox_pc PRIVATE ${STARFOX_IOS_RESOURCES})
-        set_source_files_properties(${STARFOX_IOS_RESOURCES} PROPERTIES
+        target_sources(starfox_pc PRIVATE ${STARFOX_BUNDLE_RESOURCES})
+        set_source_files_properties(${STARFOX_BUNDLE_RESOURCES} PROPERTIES
             MACOSX_PACKAGE_LOCATION Resources)
+        target_compile_definitions(starfox_pc PRIVATE
+            STARFOX_HAS_EMBEDDED_ASSETS=1
+            STARFOX_BUNDLED_ASSETS=1)
+    endif()
+
+    if(STARFOX_MACOS_BUNDLE)
+        set(STARFOX_MACOS_ICON
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/app/macos/StarFoxEnhanced.icns")
+        if(EXISTS "${STARFOX_MACOS_ICON}")
+            target_sources(starfox_pc PRIVATE "${STARFOX_MACOS_ICON}")
+            set_source_files_properties("${STARFOX_MACOS_ICON}" PROPERTIES
+                MACOSX_PACKAGE_LOCATION Resources)
+            set_target_properties(starfox_pc PROPERTIES
+                MACOSX_BUNDLE_ICON_FILE "StarFoxEnhanced.icns")
+        endif()
+        set_target_properties(starfox_pc PROPERTIES
+            OUTPUT_NAME "Star Fox Enhanced"
+            MACOSX_BUNDLE_INFO_PLIST
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/app/macos/Info.plist.in"
+            MACOSX_BUNDLE_BUNDLE_NAME "Star Fox Enhanced"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "${STARFOX_IOS_BUNDLE_ID}"
+            MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+            MACOSX_BUNDLE_COPYRIGHT
+                "Star Fox is a trademark of Nintendo. This port ships no game data.")
+
+        # The linker ad-hoc signs the executable before CMake copies the
+        # resources in, which leaves a signature that no longer describes the
+        # bundle ("code has no resources but signature indicates they must be
+        # present"). Re-signing the finished bundle is what makes it valid.
+        # An empty identity means ad-hoc, which is enough to run locally;
+        # set STARFOX_MACOS_CODE_SIGN_IDENTITY to a Developer ID to share it.
+        if(STARFOX_MACOS_CODE_SIGN_IDENTITY STREQUAL "")
+            set(STARFOX_MACOS_SIGN_ARGS --force --sign -)
+        else()
+            set(STARFOX_MACOS_SIGN_ARGS
+                --force --options runtime
+                --sign "${STARFOX_MACOS_CODE_SIGN_IDENTITY}")
+        endif()
+        add_custom_command(TARGET starfox_pc POST_BUILD
+            COMMAND codesign ${STARFOX_MACOS_SIGN_ARGS}
+                    "$<TARGET_BUNDLE_DIR:starfox_pc>"
+            COMMENT "Signing the macOS application bundle"
+            VERBATIM)
+    endif()
+
+    if(STARFOX_IOS)
 
         # The application icon. Xcode compiles a catalog placed in the
         # resources phase with actool, which is what produces Assets.car and
@@ -235,8 +293,7 @@ if(STARFOX_BUILD_RUNTIME)
         set_source_files_properties("${STARFOX_IOS_ASSET_CATALOG}" PROPERTIES
             MACOSX_PACKAGE_LOCATION Resources)
         target_compile_definitions(starfox_pc PRIVATE
-            STARFOX_HAS_EMBEDDED_ASSETS=1
-            STARFOX_BUNDLED_ASSETS=1)
+            STARFOX_TOUCH_RUNTIME=1)
         set_target_properties(starfox_pc PROPERTIES
             OUTPUT_NAME "StarFoxEnhanced"
             MACOSX_BUNDLE_INFO_PLIST
@@ -294,7 +351,10 @@ if(STARFOX_BUILD_RUNTIME)
         target_link_options(starfox_pc PRIVATE -static -static-libgcc -static-libstdc++)
     endif()
 
-    if(NOT STARFOX_IOS)
+    if(STARFOX_MACOS_BUNDLE)
+        install(TARGETS starfox_pc BUNDLE DESTINATION .)
+        install(FILES README.md THIRD_PARTY_NOTICES.md DESTINATION .)
+    elseif(NOT STARFOX_IOS)
         install(TARGETS starfox_pc RUNTIME DESTINATION .)
         install(FILES README.md THIRD_PARTY_NOTICES.md DESTINATION .)
     endif()

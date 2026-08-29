@@ -1,6 +1,6 @@
 #include "starfox/audio/spc700_audio.hpp"
 #include "starfox/app/runtime_input.hpp"
-#if defined(STARFOX_BUNDLED_ASSETS)
+#if defined(STARFOX_TOUCH_RUNTIME)
 #include "starfox/app/touch_controls.hpp"
 #endif
 #include "starfox/assets/bps.hpp"
@@ -470,12 +470,21 @@ struct RuntimeAssetSet {
 };
 
 #if defined(STARFOX_BUNDLED_ASSETS)
-// The app's own Documents folder: writable, and exposed to Files and iTunes
-// sharing so the player can drop their retail ROM in without a picker.
+// Where the player's own files live: the retail ROM they supply, the compiled
+// asset companion, and save states.
+//
+// On iOS this is the app's sandboxed Documents root, which is exactly what
+// file sharing exposes. On macOS the same call returns the user's real
+// Documents folder, which is not somewhere to scatter files, so the app takes
+// a named subfolder of it instead.
 std::filesystem::path sandbox_documents_directory() {
     if (const auto* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
         documents != nullptr && *documents != '\0') {
+#if defined(STARFOX_TOUCH_RUNTIME)
         return std::filesystem::path{documents};
+#else
+        return std::filesystem::path{documents} / "Star Fox Enhanced";
+#endif
     }
     if (char* preference_path =
             SDL_GetPrefPath("StarFoxEnhanced", "StarFoxEnhanced");
@@ -550,11 +559,16 @@ load_required_retail_v12(const std::filesystem::path& executable_directory) {
         if (!std::filesystem::is_regular_file(path)) continue;
         return {path, load_retail_v12(path)};
     }
-#if defined(STARFOX_BUNDLED_ASSETS)
+#if defined(STARFOX_TOUCH_RUNTIME)
     throw std::runtime_error{
         "Star Fox Enhanced requires an unmodified Star Fox USA v1.2 "
         "(Rev 2) ROM. Copy it into the Star Fox Enhanced folder in the "
         "Files app (On My iPhone / On My iPad), then relaunch."};
+#elif defined(STARFOX_BUNDLED_ASSETS)
+    throw std::runtime_error{
+        "Star Fox Enhanced requires an unmodified Star Fox USA v1.2 "
+        "(Rev 2) ROM.\n\nPut it in the \"Star Fox Enhanced\" folder inside "
+        "your Documents folder, then relaunch."};
 #else
     throw std::runtime_error{
         "Star Fox Enhanced requires an unmodified Star Fox USA v1.2 "
@@ -680,7 +694,7 @@ public:
 class Window {
 public:
     Window() {
-#if defined(STARFOX_BUNDLED_ASSETS)
+#if defined(STARFOX_TOUCH_RUNTIME)
         // iOS ignores the requested size and hands back the whole screen; ask
         // for fullscreen up front so the reported size is the real one.
         constexpr auto window_flags = SDL_WINDOW_FULLSCREEN
@@ -1062,7 +1076,7 @@ private:
                 std::string{"SDL_SetRenderLogicalPresentation: "}
                 + SDL_GetError()};
         }
-#if !defined(STARFOX_BUNDLED_ASSETS)
+#if !defined(STARFOX_TOUCH_RUNTIME)
         const auto integer_scale = width <= snes_width
             ? 4U : (width <= widescreen_16_9_width ? 3U : 2U);
         SDL_SetWindowSize(window_,
@@ -1350,7 +1364,7 @@ std::filesystem::path save_state_directory() {
             return true;
         };
 
-#if defined(STARFOX_BUNDLED_ASSETS)
+#if defined(STARFOX_TOUCH_RUNTIME)
         // The app's own documents root, which is what file sharing exposes.
         // A subfolder is somewhere to lose files; the root is what the Files
         // app shows. On the desktop this would be the user's own Documents
@@ -1726,7 +1740,7 @@ CameraPoint world_to_camera(
 
 } // namespace
 
-#if defined(STARFOX_BUNDLED_ASSETS)
+#if defined(STARFOX_TOUCH_RUNTIME)
 // iOS has no plain C entry point: SDL_main.h supplies one that hands control
 // to SDL's UIApplicationMain shim, which owns the UIKit run loop, and calls
 // SDL_main() from inside it. Its `main` macro is dropped immediately so it
@@ -1814,7 +1828,7 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
                 if (argc == 4) initial_map = argv[3];
                 return load_external_assets(argv[1], argv[2]);
             }
-#if !defined(STARFOX_BUNDLED_ASSETS)
+#if !defined(STARFOX_TOUCH_RUNTIME)
             std::cerr << "usage: starfox_pc [MAP]\n"
                          "   or: starfox_pc ROM SYMBOLS [MAP]\n";
 #endif
@@ -2134,7 +2148,7 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
         };
         starfox::app::InputBindings bindings;
         bindings.load();
-#if defined(STARFOX_BUNDLED_ASSETS)
+#if defined(STARFOX_TOUCH_RUNTIME)
         starfox::app::TouchControls touch_controls;
         {
             int output_width = 0;
@@ -2156,7 +2170,7 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
         // A paired controller makes the overlay redundant, so it hides and
         // gives the screen back rather than sitting on top of the game.
         const auto update_touch_visibility = [&](bool has_gamepad) {
-#if defined(STARFOX_BUNDLED_ASSETS)
+#if defined(STARFOX_TOUCH_RUNTIME)
             // Idempotent, and safe to call every frame.
             touch_controls.set_pads_hidden(has_gamepad);
 #else
@@ -2167,14 +2181,14 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
         // overlay simply contributes the same SNES button mask.
         const auto sample_player_buttons = [&](SDL_Gamepad* pad) {
             auto mask = bindings.sample(pad);
-#if defined(STARFOX_BUNDLED_ASSETS)
+#if defined(STARFOX_TOUCH_RUNTIME)
             mask = static_cast<ButtonMask>(mask | touch_controls.held());
 #endif
             return mask;
         };
         const auto menu_navigation = [&](SDL_Gamepad* pad) {
             auto mask = bindings.sample_fixed_menu_navigation(pad);
-#if defined(STARFOX_BUNDLED_ASSETS)
+#if defined(STARFOX_TOUCH_RUNTIME)
             mask = static_cast<ButtonMask>(mask | touch_controls.held());
 #endif
             return mask;
@@ -2439,7 +2453,7 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
                         step_frame_backward = true;
                     }
                 }
-#if defined(STARFOX_BUNDLED_ASSETS)
+#if defined(STARFOX_TOUCH_RUNTIME)
                 if (touch_controls.handle_event(event)) continue;
                 if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
                     int output_width = 0;
@@ -2455,7 +2469,7 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
                 } else if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
                     window_focused = false;
                     ex_mouse_input.release();
-#if defined(STARFOX_BUNDLED_ASSETS)
+#if defined(STARFOX_TOUCH_RUNTIME)
                     // A backgrounded app never receives the matching finger-up
                     // events, so a held button would stick on resume.
                     touch_controls.release_all();
@@ -2765,7 +2779,7 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
             }
             reconcile_gamepads();
             update_touch_visibility(gamepad != nullptr);
-#if defined(STARFOX_BUNDLED_ASSETS)
+#if defined(STARFOX_TOUCH_RUNTIME)
             if (touch_controls.consume_menu_press()
                 && !remap_menu.active && !hud_editor.active) {
                 save_menu.active = !save_menu.active;
@@ -4401,8 +4415,9 @@ int STARFOX_ENTRY_POINT(int argc, char** argv) {
                 MB_OK | MB_ICONERROR | MB_TASKMODAL);
         }
 #elif defined(STARFOX_BUNDLED_ASSETS)
-        // There is no console to read on a phone. A missing ROM is the common
-        // first-launch case, and the player has to be told what to do about it.
+        // A double-clicked bundle has no console anyone will read. A missing
+        // ROM is the common first-launch case, and the player has to be told
+        // what to do about it.
         static_cast<void>(SDL_ShowSimpleMessageBox(
             SDL_MESSAGEBOX_ERROR, "Star Fox Enhanced", message.c_str(),
             nullptr));

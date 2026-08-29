@@ -10,3 +10,4 @@ Starfox-Assets.BIN
 /tmp/
 __pycache__/
 *.pyc
+/src/app/macos/StarFoxEnhanced.iconset/

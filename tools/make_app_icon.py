@@ -6,6 +6,9 @@ craft from the cartridge: a flat-shaded polygonal fighter over a vanishing
 -point grid, which evokes the Super FX look without reproducing protected
 art. Drawn at 4x and downsampled so the polygon edges stay clean.
 """
+import subprocess
+from pathlib import Path
+
 from PIL import Image, ImageDraw
 
 SIZE = 1024
@@ -89,9 +92,26 @@ def main() -> None:
     poly([(0.462, 0.778), (0.538, 0.778), (0.523, 0.826), (0.477, 0.826)],
          ENGINE_CORE)
 
-    image.resize((SIZE, SIZE), Image.LANCZOS).save(
-        "src/app/ios/Assets.xcassets/AppIcon.appiconset/icon-1024.png")
+    final = image.resize((SIZE, SIZE), Image.LANCZOS)
+    final.save("src/app/ios/Assets.xcassets/AppIcon.appiconset/icon-1024.png")
     print("wrote icon-1024.png")
+
+    # macOS wants an .icns, which iconutil builds from a named iconset. The
+    # sizes below are the set it expects; anything missing falls back badly in
+    # the Dock and Finder.
+    iconset = Path("src/app/macos/StarFoxEnhanced.iconset")
+    iconset.mkdir(parents=True, exist_ok=True)
+    for size in (16, 32, 128, 256, 512):
+        final.resize((size, size), Image.LANCZOS).save(
+            iconset / f"icon_{size}x{size}.png")
+        final.resize((size * 2, size * 2), Image.LANCZOS).save(
+            iconset / f"icon_{size}x{size}@2x.png")
+    if subprocess.run(["iconutil", "-c", "icns", str(iconset),
+                       "-o", "src/app/macos/StarFoxEnhanced.icns"],
+                      check=False).returncode == 0:
+        print("wrote StarFoxEnhanced.icns")
+    else:
+        print("iconutil unavailable; .icns not regenerated")
 
 
 if __name__ == "__main__":
